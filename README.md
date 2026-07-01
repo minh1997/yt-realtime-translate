@@ -91,12 +91,15 @@ If the active tab isn't YouTube, the panel shows an error status asking you to o
   offscreen documents are not meant to be hot-reloaded via a dev server.
 - Rebuild (`npm run build`) and click the **reload icon** on the extension card
   in `chrome://extensions` after making changes.
-- `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` is set on
-  install, which means Chrome opens the side panel automatically on icon click and
-  `chrome.action.onClicked` will *not* fire (documented Chrome behavior). The real
-  capture trigger is the side panel connecting to the background via
-  `chrome.runtime.connect({ name: 'sidepanel' })` — see `autoStartForActiveTab()`
-  in `background.js`.
+- Capture is started directly inside `chrome.action.onClicked`, not via
+  `chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`. That's
+  intentional: `chrome.tabCapture.getMediaStreamId({ targetTabId })` only works on
+  a tab that currently holds the `activeTab` grant, and `activeTab` is only
+  granted by a direct user gesture such as an action click — `setPanelBehavior`
+  would swallow the click internally (so `onClicked` never fires) and capture
+  would fail with `"Extension has not been invoked for the current page (see
+  activeTab permission)."`. So `onClicked` both opens the side panel
+  (`chrome.sidePanel.open()`) and starts capture for the clicked tab.
 - The background service worker keeps the last 100 ASR/status messages in memory
   so reopening the side panel replays recent history via a `HISTORY` message.
 

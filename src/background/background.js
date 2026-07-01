@@ -1,7 +1,8 @@
 // background.js — MV3 background service worker
 //
 // Responsibilities:
-//   1. On install, make the toolbar action open the side panel.
+//   1. On the toolbar action click, open the side panel and (if the active tab
+//      is YouTube) start capturing its audio.
 //   2. Ensure an offscreen document exists, capture the active YouTube tab's
 //      audio via chrome.tabCapture, and hand the MediaStream id to offscreen.js.
 //   3. Track connected side panel ports and broadcast ASR_STATUS / ASR_TEXT /
@@ -9,15 +10,18 @@
 //   4. Keep the last 100 messages in memory so a freshly (re)opened side panel
 //      can show recent history.
 //
-// NOTE on side panel behavior:
-// chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }) makes Chrome
-// open the side panel automatically when the toolbar action is clicked — and per
-// Chrome's documented behavior, chrome.action.onClicked does NOT fire for that
-// click when this behavior is enabled. We still register onClicked below for
-// spec-completeness and as a defensive fallback, but the *real* trigger for
-// starting capture is a side panel connecting via
-// chrome.runtime.connect({ name: 'sidepanel' }) — see autoStartForActiveTab(),
-// which runs every time a side panel port connects.
+// IMPORTANT — why we do NOT use chrome.sidePanel.setPanelBehavior():
+// chrome.tabCapture.getMediaStreamId({ targetTabId }) only works on a tab that
+// currently has the "activeTab" permission granted. Per Chrome's docs, activeTab
+// is granted ONLY by a direct user gesture recognized by the extension system —
+// clicking the action, a context menu item, a keyboard shortcut, or an omnibox
+// suggestion. Opening the side panel via setPanelBehavior({ openPanelOnActionClick })
+// consumes the click internally and chrome.action.onClicked never fires, so
+// activeTab is never granted and tabCapture fails with:
+//   "Extension has not been invoked for the current page (see activeTab permission)."
+// So instead we open the side panel manually (chrome.sidePanel.open()) AND start
+// capture, both directly inside chrome.action.onClicked, so the real click is what
+// grants activeTab for the target tab.
 
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen/offscreen.html';
 const MAX_HISTORY = 100;
@@ -30,16 +34,8 @@ const sidepanelPorts = new Set();
 let capturingTabId = null;
 let creatingOffscreenPromise = null;
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel
-    .setPanelBehavior({ openPanelOnActionClick: true })
-    .catch((err) => console.error('[background] setPanelBehavior failed', err));
-});
-
-// Defensive fallback — see NOTE above. In practice, when openPanelOnActionClick
-// is enabled, Chrome handles the click internally and this listener will not run.
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab) return;
+  if (!tab || tab.id == null) return;
 
   await openSidePanelForTab(tab);
 
@@ -69,10 +65,6 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     sidepanelPorts.delete(port);
   });
-
-  // The side panel just opened (or reconnected) — try to start capture for
-  // whatever YouTube tab is currently active, if we aren't already capturing it.
-  autoStartForActiveTab();
 });
 
 // Messages sent from offscreen.js via chrome.runtime.sendMessage().
@@ -88,18 +80,9 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-async function autoStartForActiveTab() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (!tab || !isYouTubeUrl(tab.url)) return;
-    if (capturingTabId === tab.id) return; // already capturing this tab
-    await startCaptureForTab(tab);
-  } catch (err) {
-    console.warn('[background] autoStartForActiveTab failed', err);
-  }
-}
-
 async function startCaptureForTab(tab) {
+  if (capturingTabId === tab.id) return; // already capturing this tab
+
   broadcast({
     type: 'ASR_STATUS',
     status: 'starting',

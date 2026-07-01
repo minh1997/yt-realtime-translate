@@ -17,8 +17,11 @@ let workletNode = null;
 
 const TARGET_SAMPLE_RATE = 16000;
 
+console.log('[offscreen] document loaded, waiting for START_TAB_AUDIO_ASR');
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'START_TAB_AUDIO_ASR') {
+    console.log('[offscreen] received START_TAB_AUDIO_ASR', message);
     handleStart(message.streamId, message.tabId).catch(reportError);
   }
 });
@@ -130,6 +133,16 @@ async function initAsr({ sampleRate }) {
   console.log('[offscreen] initAsr (placeholder) sampleRate =', sampleRate);
 }
 
+// The AudioWorklet calls feedToAsr() continuously (every ~128-sample render
+// quantum, i.e. hundreds of times per second) for as long as the tab is
+// producing audio — that's correct/expected for a real streaming ASR engine in
+// Phase 1B. But reporting an ASR_STATUS message on every single call would
+// flood the side panel log and blow through the 100-message history in a
+// fraction of a second. So for Phase 1A we throttle only the RMS *reporting*
+// cadence, independent of the (unthrottled) audio processing itself.
+const STATUS_REPORT_INTERVAL_MS = 300;
+let lastStatusReportAt = 0;
+
 async function feedToAsr(pcm16k) {
   // Phase 1A:
   // Calculate RMS and report it as ASR_STATUS so we can visually confirm the
@@ -140,7 +153,11 @@ async function feedToAsr(pcm16k) {
   }
   const rms = pcm16k.length > 0 ? Math.sqrt(sumSquares / pcm16k.length) : 0;
 
-  reportStatus('capturing', `Receiving YouTube audio... RMS=${rms.toFixed(4)}`);
+  const now = Date.now();
+  if (now - lastStatusReportAt >= STATUS_REPORT_INTERVAL_MS) {
+    lastStatusReportAt = now;
+    reportStatus('capturing', `Receiving YouTube audio... RMS=${rms.toFixed(4)}`);
+  }
 
   // Phase 1B (later): feed pcm16k (Float32Array @ 16kHz) into a streaming ASR
   // engine and emit partial/final results, e.g.:

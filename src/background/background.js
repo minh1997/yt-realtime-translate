@@ -34,12 +34,26 @@ const sidepanelPorts = new Set();
 let capturingTabId = null;
 let creatingOffscreenPromise = null;
 
+// chrome.sidePanel.setPanelBehavior() is an "upsert" that persists in Chrome's
+// stored extension state across reloads/versions until explicitly changed —
+// simply removing the call that once set openPanelOnActionClick: true does NOT
+// undo it. Explicitly reset it to false every time the service worker starts,
+// so a stale "true" from an earlier version of this extension can't keep
+// swallowing action clicks and preventing chrome.action.onClicked from firing.
+chrome.sidePanel
+  .setPanelBehavior({ openPanelOnActionClick: false })
+  .then(() => console.log('[background] openPanelOnActionClick reset to false'))
+  .catch((err) => console.error('[background] setPanelBehavior reset failed', err));
+
 chrome.action.onClicked.addListener(async (tab) => {
+  console.log('[background] action clicked', { tabId: tab?.id, url: tab?.url });
+
   if (!tab || tab.id == null) return;
 
   await openSidePanelForTab(tab);
 
   if (!isYouTubeUrl(tab.url)) {
+    console.log('[background] not a YouTube tab, skipping capture', tab.url);
     broadcast({
       type: 'ASR_STATUS',
       status: 'error',
@@ -54,15 +68,18 @@ chrome.action.onClicked.addListener(async (tab) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidepanel') return;
 
+  console.log('[background] sidepanel port connected');
   sidepanelPorts.add(port);
 
   port.onMessage.addListener((message) => {
     if (message?.type === 'GET_HISTORY') {
+      console.log('[background] GET_HISTORY requested, history length =', history.length);
       port.postMessage({ type: 'HISTORY', history });
     }
   });
 
   port.onDisconnect.addListener(() => {
+    console.log('[background] sidepanel port disconnected');
     sidepanelPorts.delete(port);
   });
 });
@@ -81,6 +98,8 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 async function startCaptureForTab(tab) {
+  console.log('[background] startCaptureForTab', tab.id, 'currently capturing:', capturingTabId);
+
   if (capturingTabId === tab.id) return; // already capturing this tab
 
   broadcast({
@@ -91,8 +110,10 @@ async function startCaptureForTab(tab) {
 
   try {
     await ensureOffscreenDocument();
+    console.log('[background] offscreen document ready');
 
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    console.log('[background] got streamId', streamId);
     capturingTabId = tab.id;
 
     await chrome.runtime.sendMessage({
@@ -100,7 +121,9 @@ async function startCaptureForTab(tab) {
       streamId,
       tabId: tab.id,
     });
+    console.log('[background] sent START_TAB_AUDIO_ASR to offscreen');
   } catch (err) {
+    console.error('[background] startCaptureForTab failed', err);
     capturingTabId = null;
     broadcast({ type: 'ASR_ERROR', message: err?.message || String(err) });
   }

@@ -37,6 +37,7 @@ export default function App() {
   pausedRef.current = paused;
 
   const portRef = useRef(null);
+  const transcriptListRef = useRef(null);
 
   const appendLog = useCallback((entry) => {
     setLogs((prev) => {
@@ -115,6 +116,13 @@ export default function App() {
     };
   }, [handleMessage]);
 
+  useEffect(() => {
+    const el = transcriptListRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [transcript]);
+
   const handleClear = () => {
     setTranscript([]);
     setLiveText('');
@@ -143,7 +151,7 @@ export default function App() {
 
       <section className="transcript-area">
         <h2>Transcript</h2>
-        <div className="transcript-list">
+        <div className="transcript-list" ref={transcriptListRef}>
           {transcript.length === 0 && <p className="empty">No finalized text yet.</p>}
           {transcript.map((text, idx) => (
             <p key={idx} className="transcript-item">

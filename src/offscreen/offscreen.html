@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>YouTube ASR Offscreen Audio Processor</title>
+  </head>
+  <body>
+    <!-- This document is never shown to the user. It exists only to host the
+         Web Audio / getUserMedia(tab-capture) pipeline, which is not allowed
+         to run directly in a background service worker. -->
+    <script type="module" src="./offscreen.js"></script>
+  </body>
+</html>

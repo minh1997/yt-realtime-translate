@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Realtime ASR (Side Panel)",
+  "version": "0.1.0",
+  "description": "Captures YouTube livestream tab audio and prepares it for realtime ASR, shown live in a React side panel.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "activeTab",
+    "tabCapture",
+    "offscreen",
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background/background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "action": {
+    "default_title": "Start YouTube ASR"
+  }
+}

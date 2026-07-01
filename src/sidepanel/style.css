@@ -1,0 +1,203 @@
+:root {
+  color-scheme: light dark;
+  --bg: #0f1115;
+  --panel-bg: #171a21;
+  --text: #e6e8eb;
+  --muted: #9aa2ad;
+  --accent: #4f8cff;
+  --error: #ff5c5c;
+  --starting: #f5b942;
+  --capturing: #43c98d;
+  --idle: #9aa2ad;
+  --border: #2a2e37;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+#root {
+  height: 100vh;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 12px;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.app-header h1 {
+  font-size: 16px;
+  margin: 0 0 4px 0;
+}
+
+.status-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--idle);
+  flex-shrink: 0;
+}
+
+.status-idle .status-dot {
+  background: var(--idle);
+}
+.status-starting .status-dot {
+  background: var(--starting);
+}
+.status-capturing .status-dot {
+  background: var(--capturing);
+}
+.status-error .status-dot {
+  background: var(--error);
+}
+
+.status-label {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-message {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-error .status-message {
+  color: var(--error);
+}
+
+section h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 6px 0;
+}
+
+.live-text-area,
+.transcript-area,
+.log-area,
+.settings-area {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.live-text {
+  min-height: 40px;
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.transcript-list,
+.log-list {
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transcript-item {
+  margin: 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-item {
+  display: flex;
+  gap: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.log-item.log-ASR_ERROR {
+  color: var(--error);
+}
+
+.log-time {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.log-type {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.empty {
+  color: var(--muted);
+  margin: 0;
+  font-style: italic;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+}
+
+.controls button {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #21252e;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.controls button:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.settings-area label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.settings-area select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #21252e;
+  color: var(--text);
+}
+
+.settings-note {
+  margin: 4px 0 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+}

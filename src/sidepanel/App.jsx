@@ -36,6 +36,8 @@ export default function App() {
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
 
+  const portRef = useRef(null);
+
   const appendLog = useCallback((entry) => {
     setLogs((prev) => {
       const next = [...prev, entry];
@@ -101,6 +103,7 @@ export default function App() {
 
   useEffect(() => {
     const port = chrome.runtime.connect({ name: 'sidepanel' });
+    portRef.current = port;
 
     port.onMessage.addListener(handleMessage);
     port.postMessage({ type: 'GET_HISTORY' });
@@ -108,6 +111,7 @@ export default function App() {
     return () => {
       port.onMessage.removeListener(handleMessage);
       port.disconnect();
+      portRef.current = null;
     };
   }, [handleMessage]);
 
@@ -115,6 +119,7 @@ export default function App() {
     setTranscript([]);
     setLiveText('');
     setLogs([]);
+    portRef.current?.postMessage({ type: 'CLEAR_HISTORY' });
   };
 
   const handleTogglePause = () => setPaused((prev) => !prev);

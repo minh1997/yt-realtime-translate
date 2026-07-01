@@ -1,0 +1,2 @@
+Place a Vosk WASM-compatible model here as: model.tar.gz
+See README.md ("Phase 1B: setting up the Vosk ASR model") for how to obtain and package one.

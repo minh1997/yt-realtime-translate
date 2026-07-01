@@ -9,6 +9,9 @@
 //     → workletNode.port.onmessage: Float32 PCM chunk
 //     → downsample to 16kHz
 //     → feedToAsr(pcm16k)
+//     → asrEngine.acceptAudio(pcm16k) → partial/final text → ASR_TEXT message
+
+import { createAsrEngine } from './asr-engine.js';
 
 let audioContext = null;
 let mediaStream = null;
@@ -86,6 +89,16 @@ async function stopCapture() {
     mediaStream.getTracks().forEach((track) => track.stop());
     mediaStream = null;
   }
+  if (asrEngine) {
+    try {
+      asrEngine.destroy();
+    } catch (err) {
+      console.warn('[offscreen] error destroying ASR engine', err);
+    }
+    asrEngine = null;
+  }
+  pcmBuffer = new Float32Array(0);
+  asrBusy = false;
 }
 
 // Simple average-based downsampler (Float32 -> Float32 @ targetSampleRate).
@@ -120,33 +133,48 @@ function downsampleTo16k(float32Array, inputSampleRate, targetSampleRate) {
 }
 
 // ---------------------------------------------------------------------------
-// ASR interface — Phase 1A implements RMS-only verification. Phase 1B should
-// replace the body of these two functions with a real streaming ASR engine
-// (sherpa-onnx WASM / Vosk WASM / Whisper WebGPU), without touching the audio
-// pipeline above.
+// ASR interface — Phase 1B wires in a real streaming ASR engine (see
+// asr-engine.js) behind the same initAsr()/feedToAsr() functions used by
+// Phase 1A, so the audio pipeline above never needed to change.
 // ---------------------------------------------------------------------------
-
-async function initAsr({ sampleRate }) {
-  // Placeholder for realtime ASR initialization.
-  // Phase 1B: load and warm up the ASR model/engine here, e.g.
-  //   await sherpaOnnx.init({ sampleRate })
-  console.log('[offscreen] initAsr (placeholder) sampleRate =', sampleRate);
-}
 
 // The AudioWorklet calls feedToAsr() continuously (every ~128-sample render
 // quantum, i.e. hundreds of times per second) for as long as the tab is
-// producing audio — that's correct/expected for a real streaming ASR engine in
-// Phase 1B. But reporting an ASR_STATUS message on every single call would
-// flood the side panel log and blow through the 100-message history in a
-// fraction of a second. So for Phase 1A we throttle only the RMS *reporting*
-// cadence, independent of the (unthrottled) audio processing itself.
+// producing audio. Reporting an ASR_STATUS message on every single call would
+// flood the side panel log, so we throttle the RMS *reporting* cadence,
+// independent of the (unthrottled) audio processing/buffering itself.
 const STATUS_REPORT_INTERVAL_MS = 300;
 let lastStatusReportAt = 0;
 
+let asrEngine = null;
+let asrBusy = false;
+let pcmBuffer = new Float32Array(0);
+
+// Accumulate ~200ms of 16kHz audio before handing a chunk to the ASR engine.
+// Feeding it on every ~2.7ms worklet callback (a few dozen samples) would be
+// far too small/inefficient for a real recognizer; this still keeps latency low.
+const ASR_CHUNK_SAMPLES = Math.round(TARGET_SAMPLE_RATE * 0.2);
+
+async function initAsr({ sampleRate }) {
+  try {
+    asrEngine = await createAsrEngine({ sampleRate });
+    console.log('[offscreen] ASR engine ready (Vosk WASM)');
+  } catch (err) {
+    asrEngine = null;
+    console.error('[offscreen] ASR engine failed to initialize', err);
+    // Don't rethrow: audio capture + RMS status (Phase 1A) should keep working
+    // even if the ASR model asset hasn't been set up yet (see README.md).
+    reportError(
+      new Error(
+        `ASR engine unavailable (${err?.message || err}). Capture will continue without transcription — see README.md to set up the Vosk model.`
+      )
+    );
+  }
+}
+
 async function feedToAsr(pcm16k) {
-  // Phase 1A:
-  // Calculate RMS and report it as ASR_STATUS so we can visually confirm the
-  // full capture pipeline (tab -> offscreen -> worklet -> downsample) works.
+  // Phase 1A: RMS heartbeat so "capturing" status keeps confirming the audio
+  // pipeline is alive, independent of whether the ASR engine is ready.
   let sumSquares = 0;
   for (let i = 0; i < pcm16k.length; i++) {
     sumSquares += pcm16k[i] * pcm16k[i];
@@ -159,14 +187,41 @@ async function feedToAsr(pcm16k) {
     reportStatus('capturing', `Receiving YouTube audio... RMS=${rms.toFixed(4)}`);
   }
 
-  // Phase 1B (later): feed pcm16k (Float32Array @ 16kHz) into a streaming ASR
-  // engine and emit partial/final results, e.g.:
-  //
-  //   chrome.runtime.sendMessage({
-  //     type: 'ASR_TEXT',
-  //     text: 'recognized text here',
-  //     isFinal: false,
-  //   });
+  if (!asrEngine) return; // ASR engine not ready/available.
+
+  pcmBuffer = concatFloat32(pcmBuffer, pcm16k);
+  if (pcmBuffer.length < ASR_CHUNK_SAMPLES || asrBusy) return;
+
+  const chunk = pcmBuffer;
+  pcmBuffer = new Float32Array(0);
+  asrBusy = true;
+
+  try {
+    const { partialText, finalText } = await asrEngine.acceptAudio(chunk);
+
+    if (partialText) {
+      chrome.runtime
+        .sendMessage({ type: 'ASR_TEXT', text: partialText, isFinal: false })
+        .catch(() => {});
+    }
+
+    if (finalText) {
+      chrome.runtime
+        .sendMessage({ type: 'ASR_TEXT', text: finalText, isFinal: true })
+        .catch(() => {});
+    }
+  } catch (err) {
+    reportError(err);
+  } finally {
+    asrBusy = false;
+  }
+}
+
+function concatFloat32(a, b) {
+  const result = new Float32Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
 }
 
 function reportStatus(status, message) {

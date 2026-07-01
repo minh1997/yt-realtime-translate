@@ -76,6 +76,10 @@ chrome.runtime.onConnect.addListener((port) => {
       console.log('[background] GET_HISTORY requested, history length =', history.length);
       port.postMessage({ type: 'HISTORY', history });
     }
+    if (message?.type === 'CLEAR_HISTORY') {
+      console.log('[background] CLEAR_HISTORY requested');
+      history = [];
+    }
   });
 
   port.onDisconnect.addListener(() => {

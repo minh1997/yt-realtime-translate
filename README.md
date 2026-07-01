@@ -144,22 +144,22 @@ LLM-based translation is intentionally out of scope for this phase.
 
 ## Phase 1B: the Vosk ASR model
 
-`public/models/model.tar.gz` currently ships with **`vosk-model-small-en-us-0.15`**
-(the official small English model, ~40MB), already repackaged in the format
+`public/models/model.tar.gz` currently ships with **`vosk-model-small-ja-0.22`**
+(the official small Japanese model, ~47MB), already repackaged in the format
 `vosk-browser`'s worker expects, so transcription works out of the box for
-English speech. Recent official Vosk models already include the
+Japanese speech. Recent official Vosk models already include the
 `conf/model.conf` file the worker needs, so no manual repackaging was required.
 
-To swap in a different language:
+To swap in a different language (e.g. back to English):
 
 1. Download a small model from the official [Vosk models page](https://alphacephei.com/vosk/models)
-   (e.g. `vosk-model-small-ja-0.22` for Japanese, `vosk-model-small-vn-0.4` for
+   (e.g. `vosk-model-small-en-us-0.15` for English, `vosk-model-small-vn-0.4` for
    Vietnamese).
 2. Extract the zip, rename the extracted folder to `model` (so paths inside the
    archive are `model/am/...`, `model/conf/...`, etc. — this matters, it's what
    `vosk-browser`'s worker expects), and repackage it as a gzipped tar archive:
    ```bash
-   mv vosk-model-small-ja-0.22 model
+   mv vosk-model-small-en-us-0.15 model
    tar czf model.tar.gz model/
    ```
 3. Replace `public/models/model.tar.gz` with the new archive, then rebuild:

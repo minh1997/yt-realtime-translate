@@ -1,2 +1,3 @@
-Place a Vosk WASM-compatible model here as: model.tar.gz
-See README.md ("Phase 1B: setting up the Vosk ASR model") for how to obtain and package one.
+Place Vosk WASM-compatible models here, one per language, named <lang>.tar.gz
+(e.g. en.tar.gz, ja.tar.gz) — the Source language dropdown value must match.
+See README.md ("Phase 1B: the Vosk ASR models") for how to obtain and package one.

@@ -41,15 +41,23 @@
 //
 // IMPORTANT — the acoustic model is a separate asset that must be supplied:
 // the WASM engine itself is fully bundled here, but it still needs a trained
-// acoustic model (a gzipped tar archive) to actually recognize speech. That
-// model file is NOT included in this repo (it's tens of MB of binary data) —
-// see README.md for how to download one and place it at
-// public/models/model.tar.gz. Until that file exists, createAsrEngine() will
+// acoustic model (a gzipped tar archive) to actually recognize speech. Model
+// files are NOT included in this repo (they're tens of MB of binary data each)
+// — see README.md for how to download one per language and place it at
+// public/models/<lang>.tar.gz (e.g. models/en.tar.gz, models/ja.tar.gz).
+// Until the file for the selected language exists, createAsrEngine() will
 // reject and offscreen.js will report a clear ASR_ERROR while still continuing
 // to show RMS status (Phase 1A behavior) so audio capture keeps working.
 
-const DEFAULT_MODEL_PATH = 'models/model.tar.gz';
+// Each supported language ships as its own model archive under
+// public/models/ (e.g. models/en.tar.gz, models/ja.tar.gz) so the side panel
+// can switch between them at runtime without rebuilding.
+const DEFAULT_LANG = 'en';
 const WORKER_PATH = 'offscreen/vosk-worker.js';
+
+function modelPathForLang(lang) {
+  return `models/${lang || DEFAULT_LANG}.tar.gz`;
+}
 
 // Kaldi/Vosk expects samples scaled to the range of a signed int16
 // (-32768..32767), whereas our pipeline's Float32 PCM is normalized -1.0..1.0.
@@ -63,7 +71,7 @@ const INT16_SCALE = 0x8000;
 const RESULT_SETTLE_MS = 80;
 
 export async function createAsrEngine(config = {}) {
-  const { sampleRate = 16000, modelPath = DEFAULT_MODEL_PATH } = config;
+  const { sampleRate = 16000, lang = DEFAULT_LANG, modelPath = modelPathForLang(lang) } = config;
 
   const workerUrl = chrome.runtime.getURL(WORKER_PATH);
   console.log('[asr-engine] creating worker', workerUrl);
@@ -170,7 +178,7 @@ function loadModel(worker, modelUrl) {
       worker.removeEventListener('message', onMessage);
       reject(
         new Error(
-          `Timed out waiting for the ASR model to load from ${modelUrl} (no response after ${MODEL_LOAD_TIMEOUT_MS}ms). Check that public/models/model.tar.gz exists and is a valid vosk-browser model archive.`
+          `Timed out waiting for the ASR model to load from ${modelUrl} (no response after ${MODEL_LOAD_TIMEOUT_MS}ms). Check that the model archive exists under public/models/ and is a valid vosk-browser model archive.`
         )
       );
     }, MODEL_LOAD_TIMEOUT_MS);

@@ -25,7 +25,13 @@ console.log('[offscreen] document loaded, waiting for START_TAB_AUDIO_ASR');
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'START_TAB_AUDIO_ASR') {
     console.log('[offscreen] received START_TAB_AUDIO_ASR', message);
+    if (message.lang) currentLang = message.lang;
     handleStart(message.streamId, message.tabId).catch(reportError);
+  }
+
+  if (message?.type === 'SET_LANGUAGE') {
+    console.log('[offscreen] received SET_LANGUAGE', message.lang);
+    switchLanguage(message.lang).catch(reportError);
   }
 });
 
@@ -62,7 +68,7 @@ async function handleStart(streamId, tabId) {
     // so this does not create an echo/duplicate playback).
     mediaStreamSource.connect(workletNode);
 
-    await initAsr({ sampleRate: TARGET_SAMPLE_RATE });
+    await initAsr({ sampleRate: TARGET_SAMPLE_RATE, lang: currentLang });
 
     reportStatus('capturing', 'Audio captured. Listening to YouTube tab audio...');
   } catch (err) {
@@ -99,6 +105,7 @@ async function stopCapture() {
   }
   pcmBuffer = new Float32Array(0);
   asrBusy = false;
+  asrSwitching = false;
 }
 
 // Simple average-based downsampler (Float32 -> Float32 @ targetSampleRate).
@@ -148,17 +155,20 @@ let lastStatusReportAt = 0;
 
 let asrEngine = null;
 let asrBusy = false;
+let asrSwitching = false;
 let pcmBuffer = new Float32Array(0);
+let currentLang = 'en';
 
 // Accumulate ~200ms of 16kHz audio before handing a chunk to the ASR engine.
 // Feeding it on every ~2.7ms worklet callback (a few dozen samples) would be
 // far too small/inefficient for a real recognizer; this still keeps latency low.
 const ASR_CHUNK_SAMPLES = Math.round(TARGET_SAMPLE_RATE * 0.2);
 
-async function initAsr({ sampleRate }) {
+async function initAsr({ sampleRate, lang }) {
+  if (lang) currentLang = lang;
   try {
-    asrEngine = await createAsrEngine({ sampleRate });
-    console.log('[offscreen] ASR engine ready (Vosk WASM)');
+    asrEngine = await createAsrEngine({ sampleRate, lang: currentLang });
+    console.log('[offscreen] ASR engine ready (Vosk WASM)', currentLang);
   } catch (err) {
     asrEngine = null;
     console.error('[offscreen] ASR engine failed to initialize', err);
@@ -169,6 +179,39 @@ async function initAsr({ sampleRate }) {
         `ASR engine unavailable (${err?.message || err}). Capture will continue without transcription — see README.md to set up the Vosk model.`
       )
     );
+  }
+}
+
+// Switches the ASR engine's language on the fly, without touching the audio
+// capture pipeline (AudioContext/worklet keep running). Safe to call whether
+// or not capture has started yet — if it hasn't, this just remembers the
+// chosen language for when it does.
+async function switchLanguage(lang) {
+  if (!lang || lang === currentLang) return;
+  if (asrSwitching) return;
+
+  currentLang = lang;
+
+  if (!audioContext) return; // Capture not running yet; new lang applies on next start.
+
+  asrSwitching = true;
+  reportStatus('starting', `Switching ASR language to "${lang}"...`);
+
+  const previousEngine = asrEngine;
+  asrEngine = null; // feedToAsr() safely skips ASR while this is null.
+  pcmBuffer = new Float32Array(0);
+
+  try {
+    if (previousEngine) previousEngine.destroy();
+  } catch (err) {
+    console.warn('[offscreen] error destroying previous ASR engine', err);
+  }
+
+  try {
+    await initAsr({ sampleRate: TARGET_SAMPLE_RATE, lang });
+    reportStatus('capturing', `Listening in "${lang}"...`);
+  } finally {
+    asrSwitching = false;
   }
 }
 

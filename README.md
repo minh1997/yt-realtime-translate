@@ -41,7 +41,7 @@ youtube-asr-sidepanel/
 ├─ vite.config.js
 ├─ public/
 │  ├─ manifest.json
-│  └─ models/                # place your Vosk model.tar.gz here (see below)
+│  └─ models/                # place your Vosk model archives here (see below)
 ├─ src/
 │  ├─ background/
 │  │  └─ background.js       # service worker: side panel + tabCapture + offscreen + message routing
@@ -142,38 +142,50 @@ and change the one `import` at the top of `offscreen.js`.
 
 LLM-based translation is intentionally out of scope for this phase.
 
-## Phase 1B: the Vosk ASR model
+## Phase 1B: the Vosk ASR models
 
-`public/models/model.tar.gz` currently ships with **`vosk-model-small-ja-0.22`**
-(the official small Japanese model, ~47MB), already repackaged in the format
-`vosk-browser`'s worker expects, so transcription works out of the box for
-Japanese speech. Recent official Vosk models already include the
-`conf/model.conf` file the worker needs, so no manual repackaging was required.
+`public/models/` ships with **two** prebuilt model archives, one per supported
+language:
 
-To swap in a different language (e.g. back to English):
+- `en.tar.gz` — `vosk-model-small-en-us-0.15` (English, ~40MB)
+- `ja.tar.gz` — `vosk-model-small-ja-0.22` (Japanese, ~47MB)
+
+The side panel's **Source language** dropdown switches between them live —
+choosing a language sends a `SET_LANGUAGE` message that background.js persists
+(`chrome.storage.local`) and offscreen.js uses to tear down the current Vosk
+recognizer/model and load the new one, without restarting audio capture. The
+language you pick is remembered across side panel reopens and service worker
+restarts.
+
+`asr-engine.js` resolves the model file for a given language as
+`models/${lang}.tar.gz`, so adding another language is just a matter of
+dropping in a new archive and adding an `<option>` to the dropdown:
 
 1. Download a small model from the official [Vosk models page](https://alphacephei.com/vosk/models)
-   (e.g. `vosk-model-small-en-us-0.15` for English, `vosk-model-small-vn-0.4` for
-   Vietnamese).
+   (e.g. `vosk-model-small-vn-0.4` for Vietnamese, `vosk-model-small-ko-0.22` for
+   Korean).
 2. Extract the zip, rename the extracted folder to `model` (so paths inside the
    archive are `model/am/...`, `model/conf/...`, etc. — this matters, it's what
    `vosk-browser`'s worker expects), and repackage it as a gzipped tar archive:
    ```bash
-   mv vosk-model-small-en-us-0.15 model
-   tar czf model.tar.gz model/
+   mv vosk-model-small-vn-0.4 model
+   tar czf vi.tar.gz model/
    ```
-3. Replace `public/models/model.tar.gz` with the new archive, then rebuild:
+3. Copy the archive to `public/models/<lang>.tar.gz` (`<lang>` matching the
+   `value` you'll use for the new `<option>` in `App.jsx`'s Source language
+   dropdown), then rebuild:
    ```bash
    npm run build
    ```
 
-If `public/models/model.tar.gz` is ever missing or fails to load, the side
-panel still shows RMS/status updates (Phase 1A behavior) plus a clear
-`ASR_ERROR` explaining the problem — audio capture keeps working either way.
+If a model archive is ever missing or fails to load, the side panel still
+shows RMS/status updates (Phase 1A behavior) plus a clear `ASR_ERROR`
+explaining the problem — audio capture keeps working either way.
 
-> Note: `model.tar.gz` is a ~40MB binary checked into `public/models/`. If you
-> use git and don't want to commit large binaries, add it to `.gitignore` and
-> document the download step for other contributors instead.
+> Note: each `<lang>.tar.gz` is a ~40-50MB binary checked into
+> `public/models/`. If you use git and don't want to commit large binaries,
+> add them to `.gitignore` and document the download step for other
+> contributors instead.
 
 ## Permissions used
 

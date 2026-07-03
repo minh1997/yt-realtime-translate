@@ -34,6 +34,19 @@ const sidepanelPorts = new Set();
 let capturingTabId = null;
 let creatingOffscreenPromise = null;
 
+const DEFAULT_LANG = 'en';
+let currentLang = DEFAULT_LANG;
+
+// The selected ASR language is persisted (chrome.storage.local) so it survives
+// service worker restarts/reloads, and so a freshly opened side panel can show
+// the language that's actually active rather than resetting to the default.
+chrome.storage.local
+  .get('lang')
+  .then(({ lang }) => {
+    if (lang) currentLang = lang;
+  })
+  .catch((err) => console.error('[background] failed to load stored lang', err));
+
 // chrome.sidePanel.setPanelBehavior() is an "upsert" that persists in Chrome's
 // stored extension state across reloads/versions until explicitly changed —
 // simply removing the call that once set openPanelOnActionClick: true does NOT
@@ -74,7 +87,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((message) => {
     if (message?.type === 'GET_HISTORY') {
       console.log('[background] GET_HISTORY requested, history length =', history.length);
-      port.postMessage({ type: 'HISTORY', history });
+      port.postMessage({ type: 'HISTORY', history, lang: currentLang });
     }
     if (message?.type === 'CLEAR_HISTORY') {
       console.log('[background] CLEAR_HISTORY requested');
@@ -99,7 +112,24 @@ chrome.runtime.onMessage.addListener((message) => {
   ) {
     broadcast(message);
   }
+
+  if (message.type === 'SET_LANGUAGE') {
+    setLanguage(message.lang);
+  }
 });
+
+// Updates the active ASR language and persists it, so a subsequent
+// startCaptureForTab() call (or a freshly opened side panel) picks up the
+// right value. offscreen.js receives the same SET_LANGUAGE broadcast directly
+// (it's sent via chrome.runtime.sendMessage from the side panel) and swaps the
+// running ASR engine live there — this function just keeps background.js's
+// own bookkeeping in sync.
+function setLanguage(lang) {
+  if (!lang || lang === currentLang) return;
+  console.log('[background] SET_LANGUAGE', lang);
+  currentLang = lang;
+  chrome.storage.local.set({ lang }).catch((err) => console.error('[background] failed to persist lang', err));
+}
 
 async function startCaptureForTab(tab) {
   console.log('[background] startCaptureForTab', tab.id, 'currently capturing:', capturingTabId);
@@ -124,6 +154,7 @@ async function startCaptureForTab(tab) {
       type: 'START_TAB_AUDIO_ASR',
       streamId,
       tabId: tab.id,
+      lang: currentLang,
     });
     console.log('[background] sent START_TAB_AUDIO_ASR to offscreen');
   } catch (err) {

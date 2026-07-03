@@ -28,9 +28,9 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState({
-    sourceLang: 'auto',
+    sourceLang: 'en',
     targetLang: 'none',
-    asrEngine: 'sherpa-onnx',
+    asrEngine: 'vosk',
   });
 
   const pausedRef = useRef(paused);
@@ -53,6 +53,10 @@ export default function App() {
       if (message.type === 'HISTORY') {
         const hist = Array.isArray(message.history) ? message.history : [];
         setLogs(hist.slice(-MAX_LOGS));
+
+        if (message.lang) {
+          setSettings((s) => ({ ...s, sourceLang: message.lang }));
+        }
 
         const lastStatus = [...hist].reverse().find((m) => m.type === 'ASR_STATUS');
         const lastError = [...hist].reverse().find((m) => m.type === 'ASR_ERROR');
@@ -132,6 +136,12 @@ export default function App() {
 
   const handleTogglePause = () => setPaused((prev) => !prev);
 
+  const handleSourceLangChange = (e) => {
+    const lang = e.target.value;
+    setSettings((s) => ({ ...s, sourceLang: lang }));
+    chrome.runtime.sendMessage({ type: 'SET_LANGUAGE', lang }).catch(() => {});
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -190,16 +200,9 @@ export default function App() {
         <h2>Settings</h2>
         <label>
           Source language
-          <select
-            value={settings.sourceLang}
-            onChange={(e) => setSettings((s) => ({ ...s, sourceLang: e.target.value }))}
-          >
-            <option value="auto">Auto detect</option>
-            <option value="vi">Vietnamese</option>
+          <select value={settings.sourceLang} onChange={handleSourceLangChange}>
             <option value="en">English</option>
-            <option value="ko">Korean</option>
             <option value="ja">Japanese</option>
-            <option value="zh">Chinese</option>
           </select>
         </label>
         <label>
@@ -210,10 +213,10 @@ export default function App() {
           >
             <option value="none">None (transcription only)</option>
             <option value="en">English</option>
-            <option value="ko">Korean</option>
+            {/* <option value="ko">Korean</option> */}
             <option value="ja">Japanese</option>
-            <option value="zh">Chinese</option>
-            <option value="vi">Vietnamese</option>
+            {/* <option value="zh">Chinese</option> */}
+            {/* <option value="vi">Vietnamese</option> */}
           </select>
         </label>
         <label>
@@ -222,13 +225,12 @@ export default function App() {
             value={settings.asrEngine}
             onChange={(e) => setSettings((s) => ({ ...s, asrEngine: e.target.value }))}
           >
-            <option value="sherpa-onnx">sherpa-onnx WASM</option>
             <option value="vosk">Vosk WASM</option>
-            <option value="whisper-webgpu">Whisper WebGPU (later)</option>
           </select>
         </label>
         <p className="settings-note">
-          Settings are placeholders for Phase 1B — no ASR engine is running yet.
+          Source language switches the live Vosk model (English/Japanese) without
+          restarting audio capture. Target language / translation is not wired up yet.
         </p>
       </section>
     </div>

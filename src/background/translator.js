@@ -1,32 +1,30 @@
-// translator.js — Phase 2A: translates finalized ASR transcript text into
-// Vietnamese via an OpenAI-compatible chat completions API.
+// translator.js — Phase 2A: translates finalized ASR transcript text via an
+// OpenAI-compatible chat completions API.
 //
 // Runs in the background service worker (not offscreen.js) — it has nothing
 // to do with audio capture or the ASR engine, it just takes text and returns
 // translated text.
 //
-// Supports both a remote OpenAI-compatible endpoint and a local LM Studio
-// server: both expose the same POST /v1/chat/completions request/response
-// shape, so switching providers is just a matter of editing LLM_CONFIG below.
-
-// --- Remote OpenAI-compatible API (default) ---
-const LLM_CONFIG = {
-  endpoint: 'https://api.openai.com/v1/chat/completions',
-  apiKey: 'YOUR_OPENAI_API_KEY', // <-- replace with your own key (or set to 'not-needed' for LM Studio)
-  model: 'gpt-4o-mini',
+// The endpoint/API key/model are configurable per-provider from the side
+// panel's Settings section (see background.js's llmConfigs/currentLlmProvider
+// + the SET_LLM_PROVIDER/SET_LLM_CONFIG messages) and persisted in
+// chrome.storage.local. DEFAULT_LLM_CONFIGS below are only the fallback
+// values used until the user changes them — both providers expose the same
+// POST /v1/chat/completions request/response shape (LM Studio at
+// http://localhost:1234 by default), so switching is just a matter of
+// picking a provider and filling in its fields.
+export const DEFAULT_LLM_CONFIGS = {
+  openai: {
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    apiKey: '',
+    model: 'gpt-4o-mini',
+  },
+  lmstudio: {
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    apiKey: 'not-needed',
+    model: 'qwen3-8b-instruct',
+  },
 };
-
-// --- Local LM Studio API ---
-// LM Studio (https://lmstudio.ai) exposes an OpenAI-compatible server at
-// http://localhost:1234 by default. To use it instead of the remote API,
-// comment out the LLM_CONFIG above and uncomment this one (and add
-// "http://localhost:1234/*" to host_permissions in manifest.json — already
-// included by default, see manifest.json).
-// const LLM_CONFIG = {
-//   endpoint: 'http://localhost:1234/v1/chat/completions',
-//   apiKey: 'not-needed',
-//   model: 'qwen3-8b-instruct',
-// };
 
 const TARGET_LANGUAGE_NAMES = {
   vi: 'Vietnamese',
@@ -71,6 +69,8 @@ Rules:
  * @param {string[]} [params.recentSource] - recent source-language lines, for context.
  * @param {string[]} [params.recentTranslation] - recent translated lines, for context.
  * @param {Record<string,string>} [params.glossary] - terms that should stay untranslated/consistent.
+ * @param {{endpoint: string, apiKey: string, model: string}} [params.llmConfig] - which
+ *   provider/endpoint/key/model to call (defaults to DEFAULT_LLM_CONFIGS.openai).
  * @returns {Promise<string>} the translated subtitle text.
  */
 export async function translateWithLLM({
@@ -80,7 +80,10 @@ export async function translateWithLLM({
   recentSource = [],
   recentTranslation = [],
   glossary = {},
+  llmConfig = DEFAULT_LLM_CONFIGS.openai,
 }) {
+  const { endpoint, apiKey, model } = llmConfig;
+
   const userMessage = JSON.stringify({
     source_lang: sourceLang,
     target_lang: targetLang,
@@ -91,17 +94,17 @@ export async function translateWithLLM({
   });
 
   const headers = { 'Content-Type': 'application/json' };
-  if (LLM_CONFIG.apiKey && LLM_CONFIG.apiKey !== 'not-needed') {
-    headers.Authorization = `Bearer ${LLM_CONFIG.apiKey}`;
+  if (apiKey && apiKey !== 'not-needed') {
+    headers.Authorization = `Bearer ${apiKey}`;
   }
 
   let response;
   try {
-    response = await fetch(LLM_CONFIG.endpoint, {
+    response = await fetch(endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        model: LLM_CONFIG.model,
+        model,
         temperature: 0.2,
         max_tokens: 200,
         messages: [
@@ -113,7 +116,7 @@ export async function translateWithLLM({
   } catch (err) {
     // Network-level failure (offline, CORS/host_permissions missing, LM Studio
     // server not running, DNS failure, etc).
-    throw new Error(`LLM API request failed (${LLM_CONFIG.endpoint}): ${err?.message || err}`);
+    throw new Error(`LLM API request failed (${endpoint}): ${err?.message || err}`);
   }
 
   if (!response.ok) {

@@ -27,7 +27,7 @@
 // capture, both directly inside chrome.action.onClicked, so the real click is what
 // grants activeTab for the target tab.
 
-import { translateWithLLM } from './translator.js';
+import { translateWithLLM, DEFAULT_LLM_CONFIGS } from './translator.js';
 
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen/offscreen.html';
 const MAX_HISTORY = 100;
@@ -51,6 +51,17 @@ let currentLang = DEFAULT_LANG;
 // Studio server.
 const DEFAULT_TARGET_LANG = 'vi';
 let currentTargetLang = DEFAULT_TARGET_LANG;
+
+// Which provider is active, and each provider's endpoint/apiKey/model. Both
+// are runtime-editable from the side panel's Settings section (SET_LLM_PROVIDER
+// / SET_LLM_CONFIG messages) and persisted via chrome.storage.local, so the
+// user never has to hardcode a key/endpoint in translator.js.
+const DEFAULT_LLM_PROVIDER = 'openai';
+let currentLlmProvider = DEFAULT_LLM_PROVIDER;
+let llmConfigs = {
+  openai: { ...DEFAULT_LLM_CONFIGS.openai },
+  lmstudio: { ...DEFAULT_LLM_CONFIGS.lmstudio },
+};
 
 // Rolling context window (last 8 lines) passed to the LLM so it can resolve
 // pronouns/omitted subjects/terminology/tone across consecutive lines.
@@ -102,15 +113,22 @@ function enqueueAsrText(message) {
   });
 }
 
-// The selected ASR/target languages are persisted (chrome.storage.local) so
-// they survive service worker restarts/reloads, and so a freshly opened side
-// panel can show the languages that are actually active rather than
+// The selected ASR/target languages and LLM provider/config are persisted
+// (chrome.storage.local) so they survive service worker restarts/reloads, and
+// so a freshly opened side panel can show what's actually active rather than
 // resetting to the defaults.
 chrome.storage.local
-  .get(['lang', 'targetLang'])
-  .then(({ lang, targetLang }) => {
+  .get(['lang', 'targetLang', 'llmProvider', 'llmConfigs'])
+  .then(({ lang, targetLang, llmProvider, llmConfigs: storedLlmConfigs }) => {
     if (lang) currentLang = lang;
     if (targetLang) currentTargetLang = targetLang;
+    if (llmProvider) currentLlmProvider = llmProvider;
+    if (storedLlmConfigs) {
+      llmConfigs = {
+        openai: { ...DEFAULT_LLM_CONFIGS.openai, ...(storedLlmConfigs.openai || {}) },
+        lmstudio: { ...DEFAULT_LLM_CONFIGS.lmstudio, ...(storedLlmConfigs.lmstudio || {}) },
+      };
+    }
   })
   .catch((err) => console.error('[background] failed to load stored lang', err));
 
@@ -154,7 +172,14 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((message) => {
     if (message?.type === 'GET_HISTORY') {
       console.log('[background] GET_HISTORY requested, history length =', history.length);
-      port.postMessage({ type: 'HISTORY', history, lang: currentLang, targetLang: currentTargetLang });
+      port.postMessage({
+        type: 'HISTORY',
+        history,
+        lang: currentLang,
+        targetLang: currentTargetLang,
+        llmProvider: currentLlmProvider,
+        llmConfigs,
+      });
     }
     if (message?.type === 'CLEAR_HISTORY') {
       console.log('[background] CLEAR_HISTORY requested');
@@ -194,6 +219,14 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'SET_TARGET_LANGUAGE') {
     setTargetLanguage(message.lang);
   }
+
+  if (message.type === 'SET_LLM_PROVIDER') {
+    setLlmProvider(message.provider);
+  }
+
+  if (message.type === 'SET_LLM_CONFIG') {
+    setLlmConfig(message.provider, message.config);
+  }
 });
 
 // Handles a (already-broadcast) ASR_TEXT message: partial text is
@@ -217,6 +250,7 @@ async function handleAsrText(message) {
       recentSource,
       recentTranslation,
       glossary,
+      llmConfig: llmConfigs[currentLlmProvider] || DEFAULT_LLM_CONFIGS.openai,
     });
 
     updateTranslationContext(sourceText, translatedText);
@@ -263,6 +297,30 @@ function setTargetLanguage(lang) {
   recentSource = [];
   recentTranslation = [];
   lastTranslatedSource = '';
+}
+
+// Switches which provider's config (see llmConfigs below) handleAsrText() uses.
+function setLlmProvider(provider) {
+  if (!provider || !llmConfigs[provider] || provider === currentLlmProvider) return;
+  console.log('[background] SET_LLM_PROVIDER', provider);
+  currentLlmProvider = provider;
+  chrome.storage.local
+    .set({ llmProvider: provider })
+    .catch((err) => console.error('[background] failed to persist llmProvider', err));
+}
+
+// Merges a partial { endpoint?, apiKey?, model? } update into one provider's
+// stored config (the side panel sends one field at a time, on blur).
+function setLlmConfig(provider, config) {
+  if (!provider || !llmConfigs[provider] || !config) return;
+  console.log('[background] SET_LLM_CONFIG', provider, Object.keys(config));
+  llmConfigs = {
+    ...llmConfigs,
+    [provider]: { ...llmConfigs[provider], ...config },
+  };
+  chrome.storage.local
+    .set({ llmConfigs })
+    .catch((err) => console.error('[background] failed to persist llmConfigs', err));
 }
 
 async function startCaptureForTab(tab) {

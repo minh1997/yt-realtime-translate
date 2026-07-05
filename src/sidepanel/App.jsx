@@ -30,6 +30,19 @@ const TARGET_LANG_LABELS = {
   ja: 'Japanese',
 };
 
+const DEFAULT_LLM_CONFIGS = {
+  openai: {
+    endpoint: 'https://api.openai.com/v1/chat/completions',
+    apiKey: '',
+    model: 'gpt-4o-mini',
+  },
+  lmstudio: {
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    apiKey: 'not-needed',
+    model: 'qwen3-8b-instruct',
+  },
+};
+
 function logText(entry) {
   switch (entry.type) {
     case 'ASR_TEXT':
@@ -65,6 +78,7 @@ export default function App() {
     asrEngine: 'vosk',
     llmProvider: 'openai',
   });
+  const [llmConfigs, setLlmConfigs] = useState(DEFAULT_LLM_CONFIGS);
 
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -117,6 +131,15 @@ export default function App() {
         }
         if (message.targetLang) {
           setSettings((s) => ({ ...s, targetLang: message.targetLang }));
+        }
+        if (message.llmProvider) {
+          setSettings((s) => ({ ...s, llmProvider: message.llmProvider }));
+        }
+        if (message.llmConfigs) {
+          setLlmConfigs((prev) => ({
+            openai: { ...prev.openai, ...(message.llmConfigs.openai || {}) },
+            lmstudio: { ...prev.lmstudio, ...(message.llmConfigs.lmstudio || {}) },
+          }));
         }
 
         const lastStatus = [...hist].reverse().find((m) => m.type === 'ASR_STATUS');
@@ -292,6 +315,30 @@ export default function App() {
     chrome.runtime.sendMessage({ type: 'SET_TARGET_LANGUAGE', lang }).catch(() => {});
   };
 
+  const handleLlmProviderChange = (e) => {
+    const provider = e.target.value;
+    setSettings((s) => ({ ...s, llmProvider: provider }));
+    chrome.runtime.sendMessage({ type: 'SET_LLM_PROVIDER', provider }).catch(() => {});
+  };
+
+  // Keeps the input responsive while typing; the actual SET_LLM_CONFIG
+  // message (and chrome.storage.local persistence) fires on blur so we don't
+  // spam background.js/storage on every keystroke.
+  const handleLlmConfigChange = (provider, field) => (e) => {
+    const value = e.target.value;
+    setLlmConfigs((prev) => ({
+      ...prev,
+      [provider]: { ...prev[provider], [field]: value },
+    }));
+  };
+
+  const handleLlmConfigBlur = (provider, field) => (e) => {
+    const value = e.target.value;
+    chrome.runtime
+      .sendMessage({ type: 'SET_LLM_CONFIG', provider, config: { [field]: value } })
+      .catch(() => {});
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -388,19 +435,48 @@ export default function App() {
         </label>
         <label>
           LLM provider
-          <select
-            value={settings.llmProvider}
-            onChange={(e) => setSettings((s) => ({ ...s, llmProvider: e.target.value }))}
-          >
+          <select value={settings.llmProvider} onChange={handleLlmProviderChange}>
             <option value="openai">OpenAI-compatible API</option>
-            <option value="lmstudio">LM Studio local (later)</option>
+            <option value="lmstudio">LM Studio (local)</option>
           </select>
         </label>
+        <div className="llm-config-fields">
+          <label>
+            Endpoint
+            <input
+              type="text"
+              value={llmConfigs[settings.llmProvider]?.endpoint || ''}
+              onChange={handleLlmConfigChange(settings.llmProvider, 'endpoint')}
+              onBlur={handleLlmConfigBlur(settings.llmProvider, 'endpoint')}
+            />
+          </label>
+          <label>
+            API key
+            <input
+              type="password"
+              value={llmConfigs[settings.llmProvider]?.apiKey || ''}
+              onChange={handleLlmConfigChange(settings.llmProvider, 'apiKey')}
+              onBlur={handleLlmConfigBlur(settings.llmProvider, 'apiKey')}
+              placeholder={settings.llmProvider === 'lmstudio' ? 'not-needed' : 'sk-...'}
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            Model
+            <input
+              type="text"
+              value={llmConfigs[settings.llmProvider]?.model || ''}
+              onChange={handleLlmConfigChange(settings.llmProvider, 'model')}
+              onBlur={handleLlmConfigBlur(settings.llmProvider, 'model')}
+            />
+          </label>
+        </div>
         <p className="settings-note">
           Source/target language changes switch the live Vosk model and LLM
-          translation target without restarting audio capture. LLM provider
-          here is a placeholder — the active endpoint/model is configured in
-          src/background/translator.js.
+          translation target without restarting audio capture. Pick an LLM
+          provider above and fill in its endpoint/API key/model — each
+          provider's settings are saved separately, so you can switch back and
+          forth without re-entering them.
         </p>
       </section>
     </div>

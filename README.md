@@ -16,11 +16,7 @@ in a React-based Chrome **Side Panel**.
 
 ## Demo
 
-
-
 https://github.com/user-attachments/assets/39d0f06d-48a5-4729-88bb-beb44c12c2e3
-
-
 
 ## Architecture
 
@@ -227,3 +223,12 @@ it as a real, same-origin file at `dist/offscreen/vosk-worker.js`.
 blob-spawning `Model`/`KaldiRecognizer` classes. As a bonus, this also means
 the 5MB+ Vosk WASM bundle is no longer duplicated into the offscreen
 document's own JS bundle.
+
+## Support
+
+If this project helps you, you can support development by scanning the Buy Me a
+Coffee QR code below.
+
+<a href="https://buymeacoffee.com/mink1203">
+  <img src="bmc_qr.png" alt="Buy Me a Coffee QR code" width="240">
+</a>

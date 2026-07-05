@@ -14,6 +14,12 @@ in a React-based Chrome **Side Panel**.
 > side panel. See [Setting up the ASR models](#setting-up-the-vosk-asr-models)
 > below — **you must supply a model file before transcription will work.**
 
+## Demo
+
+<video src="demo.mp4" controls width="100%"></video>
+
+[Watch the demo video](demo.mp4)
+
 ## Architecture
 
 ```

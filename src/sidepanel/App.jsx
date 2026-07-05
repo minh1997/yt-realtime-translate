@@ -471,13 +471,6 @@ export default function App() {
             />
           </label>
         </div>
-        <p className="settings-note">
-          Source/target language changes switch the live Vosk model and LLM
-          translation target without restarting audio capture. Pick an LLM
-          provider above and fill in its endpoint/API key/model — each
-          provider's settings are saved separately, so you can switch back and
-          forth without re-entering them.
-        </p>
       </section>
     </div>
   );

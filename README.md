@@ -9,13 +9,10 @@ in a React-based Chrome **Side Panel**.
 - No microphone permission — audio is captured directly from the browser tab.
 - No overlay/subtitles injected into the YouTube page — all UI lives in the Side Panel.
 
-> **Phase 1A**: verifies the full audio pipeline by computing and displaying
-> RMS (volume) values in the side panel.
-> **Phase 1B** (current): a real streaming ASR engine (Vosk WASM) is wired in
-> behind the `initAsr()` / `feedToAsr()` interface and produces live
-> partial/final transcripts in the side panel. See
-> [Setting up the ASR model](#phase-1b-setting-up-the-vosk-asr-model) below —
-> **you must supply a model file before transcription will work.**
+> A real streaming ASR engine (Vosk WASM) is wired in behind the `initAsr()` /
+> `feedToAsr()` interface and produces live partial/final transcripts in the
+> side panel. See [Setting up the ASR models](#setting-up-the-vosk-asr-models)
+> below — **you must supply a model file before transcription will work.**
 
 ## Architecture
 
@@ -142,7 +139,7 @@ and change the one `import` at the top of `offscreen.js`.
 
 LLM-based translation is intentionally out of scope for this phase.
 
-## Phase 1B: the Vosk ASR models
+## Setting up the Vosk ASR models
 
 `public/models/` ships with **two** prebuilt model archives, one per supported
 language:
@@ -179,8 +176,8 @@ dropping in a new archive and adding an `<option>` to the dropdown:
    ```
 
 If a model archive is ever missing or fails to load, the side panel still
-shows RMS/status updates (Phase 1A behavior) plus a clear `ASR_ERROR`
-explaining the problem — audio capture keeps working either way.
+shows RMS/status updates plus a clear `ASR_ERROR` explaining the problem —
+audio capture keeps working either way.
 
 > Note: each `<lang>.tar.gz` is a ~40-50MB binary checked into
 > `public/models/`. If you use git and don't want to commit large binaries,

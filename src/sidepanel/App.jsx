@@ -18,19 +18,52 @@ function formatTime(ts) {
   }
 }
 
+function makeId() {
+  return typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+const TARGET_LANG_LABELS = {
+  vi: 'Vietnamese',
+  en: 'English',
+  ja: 'Japanese',
+};
+
+function logText(entry) {
+  switch (entry.type) {
+    case 'ASR_TEXT':
+      return entry.text;
+    case 'TRANSLATED_TEXT':
+      return `${entry.sourceText} → ${entry.translatedText}`;
+    case 'TRANSLATION_STATUS':
+      return entry.status;
+    case 'TRANSLATION_ERROR':
+      return entry.text;
+    default:
+      return entry.message;
+  }
+}
+
 export default function App() {
   const [status, setStatus] = useState('idle');
   const [statusMessage, setStatusMessage] = useState(
     'Open a YouTube livestream tab, then click the extension icon.'
   );
-  const [liveText, setLiveText] = useState('');
-  const [transcript, setTranscript] = useState([]);
+  // Latest partial (not-yet-final) ASR text — display only, never translated.
+  const [currentText, setCurrentText] = useState('');
+  // Finalized ASR lines + their (possibly still-pending) Vietnamese translation.
+  // Each item: { id, source, translation: string | null, createdAt }
+  const [transcripts, setTranscripts] = useState([]);
+  const [translationStatus, setTranslationStatus] = useState('');
+  const [translationError, setTranslationError] = useState('');
   const [logs, setLogs] = useState([]);
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState({
     sourceLang: 'en',
-    targetLang: 'none',
+    targetLang: 'vi',
     asrEngine: 'vosk',
+    llmProvider: 'openai',
   });
 
   const pausedRef = useRef(paused);
@@ -46,6 +79,31 @@ export default function App() {
     });
   }, []);
 
+  // Finds the most recent transcript item whose source matches and that
+  // hasn't been translated yet, and fills in its translation. If none exists
+  // (e.g. the matching final ASR_TEXT never made it into state), appends a
+  // new item with both source and translation already set.
+  const applyTranslation = useCallback((sourceText, translatedText) => {
+    setTranscripts((prev) => {
+      let targetIdx = -1;
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (prev[i].source === sourceText && prev[i].translation === null) {
+          targetIdx = i;
+          break;
+        }
+      }
+      if (targetIdx === -1) {
+        return [
+          ...prev,
+          { id: makeId(), source: sourceText, translation: translatedText, createdAt: Date.now() },
+        ];
+      }
+      const next = [...prev];
+      next[targetIdx] = { ...next[targetIdx], translation: translatedText };
+      return next;
+    });
+  }, []);
+
   const handleMessage = useCallback(
     (message) => {
       if (!message || typeof message.type !== 'string') return;
@@ -56,6 +114,9 @@ export default function App() {
 
         if (message.lang) {
           setSettings((s) => ({ ...s, sourceLang: message.lang }));
+        }
+        if (message.targetLang) {
+          setSettings((s) => ({ ...s, targetLang: message.targetLang }));
         }
 
         const lastStatus = [...hist].reverse().find((m) => m.type === 'ASR_STATUS');
@@ -69,11 +130,66 @@ export default function App() {
           setStatusMessage(lastStatus.message || '');
         }
 
-        const finalTexts = hist.filter((m) => m.type === 'ASR_TEXT' && m.isFinal);
-        setTranscript(finalTexts.map((m) => m.text));
+        // Replay finalized ASR lines + translations + the latest partial
+        // text/translation status/error in chronological order, so a
+        // reopened side panel shows the same transcript it had before.
+        const rebuiltTranscripts = [];
+        let rebuiltCurrentText = '';
+        let rebuiltTranslationStatus = '';
+        let rebuiltTranslationError = '';
 
-        const lastPartial = [...hist].reverse().find((m) => m.type === 'ASR_TEXT' && !m.isFinal);
-        if (lastPartial) setLiveText(lastPartial.text || '');
+        for (const entry of hist) {
+          if (entry.type === 'ASR_TEXT') {
+            if (entry.isFinal) {
+              const text = (entry.text || '').trim();
+              if (text) {
+                rebuiltTranscripts.push({
+                  id: makeId(),
+                  source: text,
+                  translation: null,
+                  createdAt: entry.receivedAt || Date.now(),
+                });
+              }
+              rebuiltCurrentText = '';
+            } else {
+              rebuiltCurrentText = entry.text || '';
+            }
+          } else if (entry.type === 'TRANSLATION_STATUS') {
+            rebuiltTranslationStatus = entry.status || '';
+          } else if (entry.type === 'TRANSLATED_TEXT') {
+            rebuiltTranslationStatus = '';
+            let targetIdx = -1;
+            for (let i = rebuiltTranscripts.length - 1; i >= 0; i--) {
+              if (
+                rebuiltTranscripts[i].source === entry.sourceText &&
+                rebuiltTranscripts[i].translation === null
+              ) {
+                targetIdx = i;
+                break;
+              }
+            }
+            if (targetIdx === -1) {
+              rebuiltTranscripts.push({
+                id: makeId(),
+                source: entry.sourceText,
+                translation: entry.translatedText,
+                createdAt: entry.receivedAt || Date.now(),
+              });
+            } else {
+              rebuiltTranscripts[targetIdx] = {
+                ...rebuiltTranscripts[targetIdx],
+                translation: entry.translatedText,
+              };
+            }
+          } else if (entry.type === 'TRANSLATION_ERROR') {
+            rebuiltTranslationError = entry.text || '';
+          }
+        }
+
+        setTranscripts(rebuiltTranscripts);
+        setCurrentText(rebuiltCurrentText);
+        setTranslationStatus(rebuiltTranslationStatus);
+        setTranslationError(rebuiltTranslationError);
         return;
       }
 
@@ -94,16 +210,42 @@ export default function App() {
       }
 
       if (message.type === 'ASR_TEXT') {
+        appendLog(message);
         if (message.isFinal) {
-          setTranscript((prev) => [...prev, message.text]);
-          setLiveText('');
+          const text = (message.text || '').trim();
+          setCurrentText('');
+          if (text) {
+            setTranscripts((prev) => [
+              ...prev,
+              { id: makeId(), source: text, translation: null, createdAt: Date.now() },
+            ]);
+          }
         } else {
-          setLiveText(message.text || '');
+          setCurrentText(message.text || '');
         }
+        return;
+      }
+
+      if (message.type === 'TRANSLATION_STATUS') {
+        setTranslationStatus(message.status || '');
+        appendLog(message);
+        return;
+      }
+
+      if (message.type === 'TRANSLATED_TEXT') {
+        setTranslationStatus('');
+        applyTranslation(message.sourceText, message.translatedText);
+        appendLog(message);
+        return;
+      }
+
+      if (message.type === 'TRANSLATION_ERROR') {
+        setTranslationStatus('');
+        setTranslationError(message.text || 'Unknown translation error');
         appendLog(message);
       }
     },
-    [appendLog]
+    [appendLog, applyTranslation]
   );
 
   useEffect(() => {
@@ -125,11 +267,13 @@ export default function App() {
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [transcript]);
+  }, [transcripts]);
 
   const handleClear = () => {
-    setTranscript([]);
-    setLiveText('');
+    setTranscripts([]);
+    setCurrentText('');
+    setTranslationStatus('');
+    setTranslationError('');
     setLogs([]);
     portRef.current?.postMessage({ type: 'CLEAR_HISTORY' });
   };
@@ -142,10 +286,16 @@ export default function App() {
     chrome.runtime.sendMessage({ type: 'SET_LANGUAGE', lang }).catch(() => {});
   };
 
+  const handleTargetLangChange = (e) => {
+    const lang = e.target.value;
+    setSettings((s) => ({ ...s, targetLang: lang }));
+    chrome.runtime.sendMessage({ type: 'SET_TARGET_LANGUAGE', lang }).catch(() => {});
+  };
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1>YouTube Realtime ASR</h1>
+        <h1>YouTube Realtime ASR + LLM Translation</h1>
       </header>
 
       <section className={`status-area status-${status}`}>
@@ -154,19 +304,44 @@ export default function App() {
         <span className="status-message">{statusMessage}</span>
       </section>
 
+      {(translationStatus || translationError) && (
+        <section
+          className={`translation-status-area${translationError ? ' translation-status-error' : ''}`}
+        >
+          {translationError ? (
+            <span className="translation-error-text">Translation error: {translationError}</span>
+          ) : (
+            <span className="translation-status-text">{translationStatus}</span>
+          )}
+        </section>
+      )}
+
       <section className="live-text-area">
-        <h2>Live</h2>
-        <p className="live-text">{liveText || '…'}</p>
+        <h2>Current ASR</h2>
+        <p className="live-text">{currentText || '…'}</p>
       </section>
 
       <section className="transcript-area">
-        <h2>Transcript</h2>
+        <h2>Translated Transcript</h2>
         <div className="transcript-list" ref={transcriptListRef}>
-          {transcript.length === 0 && <p className="empty">No finalized text yet.</p>}
-          {transcript.map((text, idx) => (
-            <p key={idx} className="transcript-item">
-              {text}
-            </p>
+          {transcripts.length === 0 && <p className="empty">No finalized text yet.</p>}
+          {transcripts.map((item) => (
+            <div key={item.id} className="transcript-item">
+              <p className="transcript-source">
+                <span className="transcript-label">Source</span>
+                {item.source}
+              </p>
+              <p className="transcript-translation">
+                <span className="transcript-label">
+                  {TARGET_LANG_LABELS[settings.targetLang] || settings.targetLang}
+                </span>
+                {item.translation === null ? (
+                  <em className="translating">Translating…</em>
+                ) : (
+                  item.translation
+                )}
+              </p>
+            </div>
           ))}
         </div>
       </section>
@@ -188,9 +363,7 @@ export default function App() {
             <div key={idx} className={`log-item log-${entry.type}`}>
               <span className="log-time">{formatTime(entry.receivedAt)}</span>
               <span className="log-type">{entry.type}</span>
-              <span className="log-text">
-                {entry.type === 'ASR_TEXT' ? entry.text : entry.message}
-              </span>
+              <span className="log-text">{logText(entry)}</span>
             </div>
           ))}
         </div>
@@ -207,32 +380,30 @@ export default function App() {
         </label>
         <label>
           Target language
-          <select
-            value={settings.targetLang}
-            onChange={(e) => setSettings((s) => ({ ...s, targetLang: e.target.value }))}
-          >
-            <option value="none">None (transcription only)</option>
+          <select value={settings.targetLang} onChange={handleTargetLangChange}>
+            <option value="vi">Vietnamese</option>
             <option value="en">English</option>
-            {/* <option value="ko">Korean</option> */}
             <option value="ja">Japanese</option>
-            {/* <option value="zh">Chinese</option> */}
-            {/* <option value="vi">Vietnamese</option> */}
           </select>
         </label>
         <label>
-          ASR engine
+          LLM provider
           <select
-            value={settings.asrEngine}
-            onChange={(e) => setSettings((s) => ({ ...s, asrEngine: e.target.value }))}
+            value={settings.llmProvider}
+            onChange={(e) => setSettings((s) => ({ ...s, llmProvider: e.target.value }))}
           >
-            <option value="vosk">Vosk WASM</option>
+            <option value="openai">OpenAI-compatible API</option>
+            <option value="lmstudio">LM Studio local (later)</option>
           </select>
         </label>
         <p className="settings-note">
-          Source language switches the live Vosk model (English/Japanese) without
-          restarting audio capture. Target language / translation is not wired up yet.
+          Source/target language changes switch the live Vosk model and LLM
+          translation target without restarting audio capture. LLM provider
+          here is a placeholder — the active endpoint/model is configured in
+          src/background/translator.js.
         </p>
       </section>
     </div>
   );
 }
+

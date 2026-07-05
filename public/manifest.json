@@ -12,6 +12,8 @@
     "storage"
   ],
   "host_permissions": [
+    "https://api.openai.com/*",
+    "http://localhost:1234/*",
     "*://*.youtube.com/*"
   ],
   "content_security_policy": {

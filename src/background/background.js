@@ -9,6 +9,10 @@
 //      ASR_ERROR events (received from offscreen.js) to all of them.
 //   4. Keep the last 100 messages in memory so a freshly (re)opened side panel
 //      can show recent history.
+//   5. Phase 2A: when offscreen.js reports a *finalized* ASR_TEXT (partial
+//      text is display-only and skipped), call an LLM API (translator.js) to
+//      translate it into Vietnamese and broadcast TRANSLATION_STATUS /
+//      TRANSLATED_TEXT / TRANSLATION_ERROR to the side panel.
 //
 // IMPORTANT — why we do NOT use chrome.sidePanel.setPanelBehavior():
 // chrome.tabCapture.getMediaStreamId({ targetTabId }) only works on a tab that
@@ -22,6 +26,8 @@
 // So instead we open the side panel manually (chrome.sidePanel.open()) AND start
 // capture, both directly inside chrome.action.onClicked, so the real click is what
 // grants activeTab for the target tab.
+
+import { translateWithLLM } from './translator.js';
 
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen/offscreen.html';
 const MAX_HISTORY = 100;
@@ -37,13 +43,74 @@ let creatingOffscreenPromise = null;
 const DEFAULT_LANG = 'en';
 let currentLang = DEFAULT_LANG;
 
-// The selected ASR language is persisted (chrome.storage.local) so it survives
-// service worker restarts/reloads, and so a freshly opened side panel can show
-// the language that's actually active rather than resetting to the default.
+// Phase 2A — LLM translation (final ASR text only). Both source (ASR model,
+// see currentLang above) and target language are runtime-selectable from the
+// side panel (SET_LANGUAGE / SET_TARGET_LANGUAGE messages) and persisted via
+// chrome.storage.local. See translator.js for the supported target languages
+// (vi/en/ja) and how to switch between the remote OpenAI API and a local LM
+// Studio server.
+const DEFAULT_TARGET_LANG = 'vi';
+let currentTargetLang = DEFAULT_TARGET_LANG;
+
+// Rolling context window (last 8 lines) passed to the LLM so it can resolve
+// pronouns/omitted subjects/terminology/tone across consecutive lines.
+let recentSource = [];
+let recentTranslation = [];
+
+// Terms the LLM should keep untranslated/consistent.
+const glossary = {
+  API: 'API',
+  endpoint: 'endpoint',
+  credential: 'credential',
+  'redirect URI': 'redirect URI',
+  'Chrome extension': 'Chrome extension',
+  'content script': 'content script',
+  'service worker': 'service worker',
+  WebSocket: 'WebSocket',
+  LLM: 'LLM',
+  ASR: 'ASR',
+  YouTube: 'YouTube',
+};
+
+function updateTranslationContext(sourceText, translatedText) {
+  recentSource.push(sourceText);
+  recentTranslation.push(translatedText);
+
+  recentSource = recentSource.slice(-8);
+  recentTranslation = recentTranslation.slice(-8);
+}
+
+// Guards against ASR engines emitting the exact same finalized text twice in
+// a row (observed with Vosk around endpointing), which would otherwise fire
+// a duplicate, wasted LLM call.
+let lastTranslatedSource = '';
+
+// handleAsrText() is async (it awaits the LLM call) and updates the shared
+// recentSource/recentTranslation context buffer at the end. If two finalized
+// ASR_TEXT messages arrived close together, calling handleAsrText() directly
+// from the onMessage listener would let both LLM calls run concurrently and
+// resolve in any order, scrambling the context buffer's chronological order
+// (and the model's "previous context" for a given line could end up
+// containing text that came *after* it). Routing every call through this
+// promise chain guarantees translations are requested and context is updated
+// strictly one-at-a-time, in the order the final text was received.
+let translationQueue = Promise.resolve();
+
+function enqueueAsrText(message) {
+  translationQueue = translationQueue.then(() => handleAsrText(message)).catch((err) => {
+    console.error('[background] translation queue error', err);
+  });
+}
+
+// The selected ASR/target languages are persisted (chrome.storage.local) so
+// they survive service worker restarts/reloads, and so a freshly opened side
+// panel can show the languages that are actually active rather than
+// resetting to the defaults.
 chrome.storage.local
-  .get('lang')
-  .then(({ lang }) => {
+  .get(['lang', 'targetLang'])
+  .then(({ lang, targetLang }) => {
     if (lang) currentLang = lang;
+    if (targetLang) currentTargetLang = targetLang;
   })
   .catch((err) => console.error('[background] failed to load stored lang', err));
 
@@ -87,11 +154,14 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((message) => {
     if (message?.type === 'GET_HISTORY') {
       console.log('[background] GET_HISTORY requested, history length =', history.length);
-      port.postMessage({ type: 'HISTORY', history, lang: currentLang });
+      port.postMessage({ type: 'HISTORY', history, lang: currentLang, targetLang: currentTargetLang });
     }
     if (message?.type === 'CLEAR_HISTORY') {
       console.log('[background] CLEAR_HISTORY requested');
       history = [];
+      recentSource = [];
+      recentTranslation = [];
+      lastTranslatedSource = '';
     }
   });
 
@@ -113,10 +183,59 @@ chrome.runtime.onMessage.addListener((message) => {
     broadcast(message);
   }
 
+  if (message.type === 'ASR_TEXT') {
+    enqueueAsrText(message);
+  }
+
   if (message.type === 'SET_LANGUAGE') {
     setLanguage(message.lang);
   }
+
+  if (message.type === 'SET_TARGET_LANGUAGE') {
+    setTargetLanguage(message.lang);
+  }
 });
+
+// Handles a (already-broadcast) ASR_TEXT message: partial text is
+// display-only and never reaches the LLM. Only finalized text is translated.
+async function handleAsrText(message) {
+  if (!message.isFinal) return;
+
+  const sourceText = (message.text || '').trim();
+  if (!sourceText || sourceText.length < 2) return; // skip empty/very short text
+  if (sourceText === lastTranslatedSource) return; // duplicate final text guard
+
+  lastTranslatedSource = sourceText;
+
+  broadcastToSidePanel({ type: 'TRANSLATION_STATUS', status: 'Translating...' });
+
+  try {
+    const translatedText = await translateWithLLM({
+      currentText: sourceText,
+      sourceLang: currentLang,
+      targetLang: currentTargetLang,
+      recentSource,
+      recentTranslation,
+      glossary,
+    });
+
+    updateTranslationContext(sourceText, translatedText);
+
+    broadcastToSidePanel({
+      type: 'TRANSLATED_TEXT',
+      sourceText,
+      translatedText,
+      isFinal: true,
+    });
+  } catch (err) {
+    console.error('[background] translation failed', err);
+    broadcastToSidePanel({ type: 'TRANSLATION_ERROR', text: err?.message || String(err) });
+  }
+}
+
+function broadcastToSidePanel(message) {
+  broadcast(message);
+}
 
 // Updates the active ASR language and persists it, so a subsequent
 // startCaptureForTab() call (or a freshly opened side panel) picks up the
@@ -129,6 +248,21 @@ function setLanguage(lang) {
   console.log('[background] SET_LANGUAGE', lang);
   currentLang = lang;
   chrome.storage.local.set({ lang }).catch((err) => console.error('[background] failed to persist lang', err));
+}
+
+// Updates the translation target language. Resets the rolling context buffer
+// since recentTranslation was built in the *previous* target language — feeding
+// it to the LLM alongside a new target language would just confuse it.
+function setTargetLanguage(lang) {
+  if (!lang || lang === currentTargetLang) return;
+  console.log('[background] SET_TARGET_LANGUAGE', lang);
+  currentTargetLang = lang;
+  chrome.storage.local
+    .set({ targetLang: lang })
+    .catch((err) => console.error('[background] failed to persist targetLang', err));
+  recentSource = [];
+  recentTranslation = [];
+  lastTranslatedSource = '';
 }
 
 async function startCaptureForTab(tab) {

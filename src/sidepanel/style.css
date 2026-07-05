@@ -89,6 +89,23 @@ body {
   color: var(--error);
 }
 
+.translation-status-area {
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.translation-status-error {
+  border-color: var(--error);
+}
+
+.translation-error-text {
+  color: var(--error);
+}
+
 section h2 {
   font-size: 12px;
   text-transform: uppercase;
@@ -125,8 +142,32 @@ section h2 {
 
 .transcript-item {
   margin: 0;
-  padding: 4px 0;
+  padding: 6px 0;
   border-bottom: 1px solid var(--border);
+}
+
+.transcript-source,
+.transcript-translation {
+  margin: 0 0 2px 0;
+  line-height: 1.4;
+}
+
+.transcript-translation {
+  margin-bottom: 0;
+}
+
+.transcript-label {
+  display: inline-block;
+  min-width: 66px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-right: 6px;
+}
+
+.translating {
+  color: var(--muted);
 }
 
 .log-item {

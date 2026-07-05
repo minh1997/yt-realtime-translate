@@ -16,9 +16,7 @@ in a React-based Chrome **Side Panel**.
 
 ## Demo
 
-<video src="demo.mp4" controls width="100%"></video>
-
-[Watch the demo video](demo.mp4)
+https://github.com/minh1997/yt-realtime-translate/raw/main/demo.mp4
 
 ## Architecture
 

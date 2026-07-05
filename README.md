@@ -16,9 +16,11 @@ in a React-based Chrome **Side Panel**.
 
 ## Demo
 
-[![Demo video preview](docs/assets/demo-preview.png)](demo.mp4)
 
-[Watch the demo video](demo.mp4)
+
+https://github.com/user-attachments/assets/39d0f06d-48a5-4729-88bb-beb44c12c2e3
+
+
 
 ## Architecture
 

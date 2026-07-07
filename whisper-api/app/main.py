@@ -10,40 +10,29 @@
 #         "channels": 1, "language": "ja", "task": "transcribe"}
 #   2. Client streams binary Int16 PCM frames (little-endian, mono).
 #   3. Server sends JSON messages back at any time:
-#        {"type": "ASR_STATUS", "text": "Receiving audio... RMS=0.034"}
-#        {"type": "ASR_TEXT", "text": "...", "isFinal": false, "engine": "faster-whisper"}
-#        {"type": "ASR_TEXT", "text": "...", "isFinal": true,  "engine": "faster-whisper"}
+#        {"type": "ASR_STATUS", "text": "...", "rms": 0.034, "bufferSeconds": 18.4}
+#        {"type": "ASR_TEXT", "text": "...", "isFinal": false, "engine": "faster-whisper",
+#         "windowStartMs": 12000, "windowEndMs": 20000, "sequence": 12}
+#        {"type": "ASR_TEXT", "text": "...", "isFinal": true,  "engine": "faster-whisper", "sequence": 13}
 #        {"type": "ASR_ERROR", "text": "..."}
+#   Extra fields on ASR_STATUS/ASR_TEXT are additive — the extension ignores
+#   anything it doesn't recognize.
 #
-# Whisper is chunk-based, not true streaming ASR. Every STT_CHUNK_SECONDS we
-# transcribe the latest rolling window of audio (AudioBuffer) and emit it as
-# a (deduplicated) partial ASR_TEXT. A partial is promoted to a final
-# ASR_TEXT once the audio has gone quiet (RMS below SILENCE_RMS_THRESHOLD)
-# for FINAL_SILENCE_SECONDS — a simple silence-based finalization strategy,
-# not full VAD/endpointing.
+# The actual streaming/buffering/transcription logic lives in session.py
+# (ASRSession): a non-blocking audio receiver runs concurrently with a
+# background transcription worker over overlapping windows, so a slow or
+# busy faster-whisper call never blocks audio from being received, and nothing
+# is dropped even if the speaker never pauses. See session.py's module
+# docstring for the full design rationale.
 
 import asyncio
-import time
 
-import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket
 
-from .audio_buffer import AudioBuffer
-from .settings import STT_CHUNK_SECONDS, STT_OVERLAP_SECONDS, STT_SAMPLE_RATE
+from .session import ASRSession
 from .transcriber import get_transcriber
 
 app = FastAPI(title="Local Whisper ASR API")
-
-SILENCE_RMS_THRESHOLD = 0.01
-FINAL_SILENCE_SECONDS = 0.8
-STATUS_REPORT_INTERVAL_SECONDS = 0.3
-
-
-def normalize_text(text: str) -> str:
-    # Simple trim + whitespace-collapse. Deliberately not inserting/removing
-    # spaces beyond that: Japanese text from Whisper already comes back
-    # without spaces between words, and adding any would be wrong.
-    return " ".join(text.strip().split())
 
 
 @app.on_event("startup")
@@ -70,106 +59,25 @@ async def asr_ws(websocket: WebSocket):
         await websocket.close()
         return
 
-    language = config.get("language", "ja")
-    transcriber = get_transcriber()
-    buffer = AudioBuffer(sample_rate=STT_SAMPLE_RATE)
+    session = ASRSession(websocket, config)
 
-    last_partial_text = ""
-    last_final_text = ""
-    last_transcribe_time = 0.0
-    last_status_time = 0.0
-    silence_started_at = None
-    transcribing = False
-
-    async def transcribe_and_send(chunk: np.ndarray) -> None:
-        nonlocal last_partial_text, transcribing
-        transcribing = True
-        try:
-            text = await asyncio.to_thread(transcriber.transcribe_chunk, chunk, language)
-            text = normalize_text(text)
-
-            if text and text != last_partial_text:
-                last_partial_text = text
-                await websocket.send_json(
-                    {
-                        "type": "ASR_TEXT",
-                        "text": text,
-                        "isFinal": False,
-                        "engine": "faster-whisper",
-                    }
-                )
-        except Exception as exc:
-            try:
-                await websocket.send_json({"type": "ASR_ERROR", "text": str(exc)})
-            except Exception:
-                pass
-        finally:
-            transcribing = False
+    # receive_audio_loop and transcribe_loop run concurrently: the receiver
+    # must never block on transcription, so audio keeps flowing into the
+    # rolling buffer even while faster-whisper is busy with a previous
+    # window. Whichever task ends first (normally the receiver, on
+    # disconnect) triggers cleanup of the other.
+    receiver_task = asyncio.create_task(session.receive_audio_loop())
+    transcriber_task = asyncio.create_task(session.transcribe_loop())
 
     try:
-        while True:
-            message = await websocket.receive()
+        await asyncio.wait(
+            {receiver_task, transcriber_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        session.running = False
+        for task in (receiver_task, transcriber_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(receiver_task, transcriber_task, return_exceptions=True)
+        await session.finalize_remaining()
 
-            if message.get("type") == "websocket.disconnect":
-                break
-
-            data = message.get("bytes")
-            if data is None:
-                # Ignore any stray non-binary frames after the initial config.
-                continue
-
-            audio_i16 = np.frombuffer(data, dtype=np.int16)
-            audio_f32 = audio_i16.astype(np.float32) / 32768.0
-
-            buffer.add_audio(audio_f32)
-
-            rms = float(np.sqrt(np.mean(audio_f32 ** 2))) if audio_f32.size else 0.0
-            now = time.time()
-
-            if now - last_status_time >= STATUS_REPORT_INTERVAL_SECONDS:
-                last_status_time = now
-                await websocket.send_json(
-                    {"type": "ASR_STATUS", "text": f"Receiving audio... RMS={rms:.3f}"}
-                )
-
-            # Simple silence-based finalization: once RMS has stayed below the
-            # threshold for FINAL_SILENCE_SECONDS, promote the current partial
-            # to a final (deduplicated so we never send the same final twice).
-            if rms < SILENCE_RMS_THRESHOLD:
-                if silence_started_at is None:
-                    silence_started_at = now
-                elif (
-                    now - silence_started_at >= FINAL_SILENCE_SECONDS
-                    and last_partial_text
-                    and last_partial_text != last_final_text
-                ):
-                    last_final_text = last_partial_text
-                    await websocket.send_json(
-                        {
-                            "type": "ASR_TEXT",
-                            "text": last_final_text,
-                            "isFinal": True,
-                            "engine": "faster-whisper",
-                        }
-                    )
-                    silence_started_at = None
-            else:
-                silence_started_at = None
-
-            if (
-                not transcribing
-                and now - last_transcribe_time >= STT_CHUNK_SECONDS
-                and buffer.duration_seconds() > 0
-            ):
-                last_transcribe_time = now
-                chunk = buffer.get_latest_chunk(STT_CHUNK_SECONDS + STT_OVERLAP_SECONDS)
-                if chunk.size > 0:
-                    asyncio.create_task(transcribe_and_send(chunk))
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        try:
-            await websocket.send_json({"type": "ASR_ERROR", "text": str(exc)})
-        except Exception:
-            pass

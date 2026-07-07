@@ -14,12 +14,21 @@
 //       server {type:'ASR_ERROR', text}            -> {type:'ASR_ERROR', message}
 //   - Automatically reconnect (fixed delay) if the connection drops or never
 //     opens, re-sending the config message once reconnected.
+//   - Never send audio frames before the config message has actually been
+//     sent (configSent guard below), and never drop a frame while the
+//     socket is open — if the OS socket send buffer backs up
+//     (bufferedAmount growing), report an ASR_STATUS warning to the side
+//     panel rather than silently degrading.
 //
 // This file has no dependency on the createAsrEngine() interface; it's a
 // small, focused transport used by asr-whisper-api.js.
 
 const DEFAULT_URL = 'ws://127.0.0.1:8787/asr';
 const RECONNECT_DELAY_MS = 1500;
+// If the socket's outgoing buffer grows past this, the network/server is
+// falling behind the mic; warn (throttled) rather than silently drop audio.
+const BUFFERED_AMOUNT_WARNING_BYTES = 256 * 1024;
+const BUFFERED_AMOUNT_WARNING_INTERVAL_MS = 3000;
 
 function float32ToInt16(float32Array) {
   const int16 = new Int16Array(float32Array.length);
@@ -40,6 +49,8 @@ export class SttClient {
     this.destroyed = false;
     this.reconnectTimer = null;
     this.hasConnectedOnce = false;
+    this.configSent = false;
+    this._lastBufferedWarningAt = 0;
 
     this._connect();
   }
@@ -58,9 +69,11 @@ export class SttClient {
     }
 
     this.socket = socket;
+    this.configSent = false;
 
     socket.onopen = () => {
       this.hasConnectedOnce = true;
+      console.log('[stt-client] WebSocket connected', this.url);
       reportStatus('capturing', 'Connected to local Whisper API.');
       try {
         socket.send(
@@ -73,6 +86,9 @@ export class SttClient {
             task: 'transcribe',
           })
         );
+        // Only allow sendAudio() to actually send frames once the config
+        // message has gone out first, per the WebSocket /asr protocol.
+        this.configSent = true;
       } catch (err) {
         reportError(err);
       }
@@ -96,6 +112,8 @@ export class SttClient {
 
     socket.onclose = () => {
       if (this.socket === socket) this.socket = null;
+      this.configSent = false;
+      console.log('[stt-client] WebSocket disconnected', this.url);
       if (this.destroyed) return;
       reportStatus('error', 'Disconnected from local Whisper API. Reconnecting...');
       this._scheduleReconnect();
@@ -135,11 +153,28 @@ export class SttClient {
   }
 
   // Sends a chunk of Float32 PCM (16kHz, [-1,1]) as an Int16 binary frame.
-  // No-ops if the socket isn't currently open (e.g. mid-reconnect) — audio is
-  // simply dropped rather than buffered, since Whisper transcribes recent
-  // rolling context server-side anyway (see whisper-api/app/audio_buffer.py).
+  // No-ops if the socket isn't currently open (e.g. mid-reconnect) or before
+  // the config message has been sent — audio is simply dropped in those
+  // cases (there's no connected server session to receive it yet), but never
+  // dropped while the socket is open and config-acknowledged. If the OS send
+  // buffer is backing up (bufferedAmount growing — the network/server can't
+  // keep up), a throttled ASR_STATUS warning is reported instead of silently
+  // degrading.
   sendAudio(pcm16k) {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.configSent) return;
+
+    if (this.socket.bufferedAmount > BUFFERED_AMOUNT_WARNING_BYTES) {
+      const now = Date.now();
+      if (now - this._lastBufferedWarningAt > BUFFERED_AMOUNT_WARNING_INTERVAL_MS) {
+        this._lastBufferedWarningAt = now;
+        console.warn('[stt-client] WebSocket bufferedAmount high', this.socket.bufferedAmount);
+        reportStatus(
+          'capturing',
+          'Warning: audio is being sent faster than the local Whisper API can receive it.'
+        );
+      }
+    }
+
     const int16 = float32ToInt16(pcm16k);
     try {
       this.socket.send(int16.buffer);

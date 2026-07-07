@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+numpy
+faster-whisper
+python-dotenv

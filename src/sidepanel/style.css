@@ -89,6 +89,14 @@ body {
   color: var(--error);
 }
 
+.status-engine {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .translation-status-area {
   padding: 6px 10px;
   border-radius: 8px;

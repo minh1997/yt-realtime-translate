@@ -9,7 +9,11 @@
 //     → workletNode.port.onmessage: Float32 PCM chunk
 //     → downsample to 16kHz
 //     → feedToAsr(pcm16k)
-//     → asrEngine.acceptAudio(pcm16k) → partial/final text → ASR_TEXT message
+//     → asrEngine.acceptAudio(pcm16k) — forwards audio to the local Whisper
+//       API over WebSocket (see asr-whisper-api.js / stt-client.js); the
+//       resulting ASR_STATUS/ASR_TEXT/ASR_ERROR messages arrive asynchronously
+//       and are sent to background.js directly by stt-client.js, not returned
+//       from acceptAudio().
 
 import { createAsrEngine } from './asr-engine.js';
 
@@ -104,7 +108,6 @@ async function stopCapture() {
     asrEngine = null;
   }
   pcmBuffer = new Float32Array(0);
-  asrBusy = false;
   asrSwitching = false;
 }
 
@@ -140,21 +143,15 @@ function downsampleTo16k(float32Array, inputSampleRate, targetSampleRate) {
 }
 
 // ---------------------------------------------------------------------------
-// ASR interface — Phase 1B wires in a real streaming ASR engine (see
-// asr-engine.js) behind the same initAsr()/feedToAsr() functions used by
-// Phase 1A, so the audio pipeline above never needed to change.
+// ASR interface — a real ASR engine (see asr-engine.js) sits behind the same
+// initAsr()/feedToAsr() functions, so the audio pipeline above never needs to
+// change when swapping engines. The active engine talks to a local Whisper
+// API over WebSocket (see asr-whisper-api.js); RMS/status heartbeats now come
+// from that server (forwarded by stt-client.js) instead of being computed
+// here.
 // ---------------------------------------------------------------------------
 
-// The AudioWorklet calls feedToAsr() continuously (every ~128-sample render
-// quantum, i.e. hundreds of times per second) for as long as the tab is
-// producing audio. Reporting an ASR_STATUS message on every single call would
-// flood the side panel log, so we throttle the RMS *reporting* cadence,
-// independent of the (unthrottled) audio processing/buffering itself.
-const STATUS_REPORT_INTERVAL_MS = 300;
-let lastStatusReportAt = 0;
-
 let asrEngine = null;
-let asrBusy = false;
 let asrSwitching = false;
 let pcmBuffer = new Float32Array(0);
 let currentLang = 'en';
@@ -168,15 +165,15 @@ async function initAsr({ sampleRate, lang }) {
   if (lang) currentLang = lang;
   try {
     asrEngine = await createAsrEngine({ sampleRate, lang: currentLang });
-    console.log('[offscreen] ASR engine ready (Vosk WASM)', currentLang);
+    console.log('[offscreen] ASR engine ready (local Whisper API)', currentLang);
   } catch (err) {
     asrEngine = null;
     console.error('[offscreen] ASR engine failed to initialize', err);
-    // Don't rethrow: audio capture + RMS status (Phase 1A) should keep working
-    // even if the ASR model asset hasn't been set up yet (see README.md).
+    // Don't rethrow: audio capture should keep working even if the ASR engine
+    // couldn't be created — see whisper-api/README.md to start the local server.
     reportError(
       new Error(
-        `ASR engine unavailable (${err?.message || err}). Capture will continue without transcription — see README.md to set up the Vosk model.`
+        `ASR engine unavailable (${err?.message || err}). Capture will continue without transcription — make sure the local Whisper API is running (see whisper-api/README.md).`
       )
     );
   }
@@ -216,47 +213,18 @@ async function switchLanguage(lang) {
 }
 
 async function feedToAsr(pcm16k) {
-  // Phase 1A: RMS heartbeat so "capturing" status keeps confirming the audio
-  // pipeline is alive, independent of whether the ASR engine is ready.
-  let sumSquares = 0;
-  for (let i = 0; i < pcm16k.length; i++) {
-    sumSquares += pcm16k[i] * pcm16k[i];
-  }
-  const rms = pcm16k.length > 0 ? Math.sqrt(sumSquares / pcm16k.length) : 0;
-
-  const now = Date.now();
-  if (now - lastStatusReportAt >= STATUS_REPORT_INTERVAL_MS) {
-    lastStatusReportAt = now;
-    reportStatus('capturing', `Receiving YouTube audio... RMS=${rms.toFixed(4)}`);
-  }
-
   if (!asrEngine) return; // ASR engine not ready/available.
 
   pcmBuffer = concatFloat32(pcmBuffer, pcm16k);
-  if (pcmBuffer.length < ASR_CHUNK_SAMPLES || asrBusy) return;
+  if (pcmBuffer.length < ASR_CHUNK_SAMPLES) return;
 
   const chunk = pcmBuffer;
   pcmBuffer = new Float32Array(0);
-  asrBusy = true;
 
   try {
-    const { partialText, finalText } = await asrEngine.acceptAudio(chunk);
-
-    if (partialText) {
-      chrome.runtime
-        .sendMessage({ type: 'ASR_TEXT', text: partialText, isFinal: false })
-        .catch(() => {});
-    }
-
-    if (finalText) {
-      chrome.runtime
-        .sendMessage({ type: 'ASR_TEXT', text: finalText, isFinal: true })
-        .catch(() => {});
-    }
+    await asrEngine.acceptAudio(chunk);
   } catch (err) {
     reportError(err);
-  } finally {
-    asrBusy = false;
   }
 }
 

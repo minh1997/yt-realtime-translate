@@ -1,18 +1,21 @@
 # YouTube Realtime ASR (Side Panel) — MVP
 
-A local-only Chrome Extension (Manifest V3) that captures audio from the active
-**YouTube tab** and prepares it for realtime ASR (speech-to-text), displayed live
-in a React-based Chrome **Side Panel**.
+A Chrome Extension (Manifest V3) that captures audio from the active
+**YouTube tab** and transcribes it in realtime using a **local Whisper API**
+(FastAPI + [faster-whisper](https://github.com/SYSTRAN/faster-whisper)),
+displayed live in a React-based Chrome **Side Panel**.
 
-- No backend server.
+- No remote backend — the Whisper API runs locally on `127.0.0.1` only.
 - No Web Speech API.
 - No microphone permission — audio is captured directly from the browser tab.
 - No overlay/subtitles injected into the YouTube page — all UI lives in the Side Panel.
 
-> A real streaming ASR engine (Vosk WASM) is wired in behind the `initAsr()` /
-> `feedToAsr()` interface and produces live partial/final transcripts in the
-> side panel. See [Setting up the ASR models](#setting-up-the-vosk-asr-models)
-> below — **you must supply a model file before transcription will work.**
+> Realtime ASR is wired in behind the `initAsr()` / `feedToAsr()` interface in
+> `offscreen.js`, which forwards audio over WebSocket to a local Whisper API
+> process (see [whisper-api/](whisper-api/README.md)) and shows live
+> partial/final transcripts in the side panel. **You must start the local
+> Whisper API before transcription will work** — see
+> [Local Whisper API](#local-whisper-api) below.
 
 ## Demo
 
@@ -28,41 +31,58 @@ YouTube livestream tab audio
   → AudioWorklet (pcm-worklet.js)
   → Float32 PCM chunks
   → downsample to 16kHz
-  → feedToAsr(pcm16k)
-  → asr-engine.js: createAsrEngine() → acceptAudio(pcm16k) → { partialText?, finalText? }
-  → background service worker (broadcasts ASR_STATUS / ASR_TEXT / ASR_ERROR)
+  → feedToAsr(pcm16k) → asr-engine.js: createAsrEngine() → acceptAudio(pcm16k)
+  → asr-whisper-api.js / stt-client.js: Float32 → Int16 PCM
+  → WebSocket ws://127.0.0.1:8787/asr
+  → whisper-api/ (local FastAPI + faster-whisper process)
+  → ASR_STATUS / ASR_TEXT / ASR_ERROR JSON sent back over the same socket
+  → background service worker (broadcasts to all side panels)
   → React Side Panel (chrome.runtime.connect port)
+  → optional LLM translation of finalized text (src/background/translator.js)
 ```
 
 ## Project structure
 
 ```
 youtube-asr-sidepanel/
-├─ package.json
+├─ package.json               # root scripts: dev/build (extension) + dev:whisper (API)
 ├─ vite.config.js
 ├─ public/
 │  ├─ manifest.json
-│  └─ models/                # place your Vosk model archives here (see below)
+│  └─ models/                 # Vosk model archives — only needed if you roll back to asr-vosk.js
 ├─ src/
 │  ├─ background/
-│  │  └─ background.js       # service worker: side panel + tabCapture + offscreen + message routing
+│  │  ├─ background.js       # service worker: side panel + tabCapture + offscreen + message routing
+│  │  └─ translator.js       # optional LLM translation of finalized transcript lines
 │  ├─ offscreen/
 │  │  ├─ offscreen.html
 │  │  ├─ offscreen.js        # getUserMedia(tab), AudioContext, AudioWorklet wiring, ASR wiring
-│  │  ├─ asr-engine.js       # createAsrEngine() abstraction (Vosk WASM implementation)
+│  │  ├─ asr-engine.js       # active-engine selector — re-exports asr-whisper-api.js
+│  │  ├─ asr-whisper-api.js  # createAsrEngine() implementation backed by the local Whisper API
+│  │  ├─ stt-client.js       # WebSocket client: PCM→Int16 framing, reconnect, message forwarding
+│  │  ├─ asr-vosk.js         # previous Vosk WASM implementation, isolated/unused (rollback option)
 │  │  └─ pcm-worklet.js      # AudioWorkletProcessor — posts raw Float32 PCM chunks
 │  └─ sidepanel/
 │     ├─ sidepanel.html
 │     ├─ main.jsx
 │     ├─ App.jsx             # status / live text / transcript / log / settings UI
 │     └─ style.css
-└─ dist/                     # build output — load this folder as unpacked extension
+├─ whisper-api/               # local FastAPI + faster-whisper server (see whisper-api/README.md)
+│  ├─ requirements.txt
+│  ├─ README.md
+│  └─ app/
+│     ├─ main.py             # GET /health, WebSocket /asr
+│     ├─ transcriber.py      # faster-whisper wrapper
+│     ├─ audio_buffer.py     # rolling PCM buffer
+│     └─ settings.py         # env-driven config (STT_MODEL, STT_DEVICE, ...)
+└─ dist/                      # build output — load this folder as unpacked extension
 ```
 
 ## Requirements
 
 - Node.js + npm
 - Google Chrome 116 or newer (required for `chrome.sidePanel`, `chrome.offscreen`, `chrome.runtime.getContexts`)
+- Python 3.9+ (for the local Whisper API in [whisper-api/](whisper-api/README.md))
 
 ## Build & install
 
@@ -80,22 +100,33 @@ Then load it in Chrome:
 
 ## Try it out
 
-1. Open a YouTube livestream (or any YouTube video) in a tab: `https://www.youtube.com/...`
-2. Click the extension's toolbar icon
-3. The Chrome side panel opens and shows:
+1. Start the local Whisper API first (see [Local Whisper API](#local-whisper-api)):
+   ```bash
+   npm run dev:whisper
+   ```
+2. Open a YouTube livestream (or any YouTube video) in a tab: `https://www.youtube.com/...`
+3. Click the extension's toolbar icon
+4. The Chrome side panel opens and shows:
    - `Starting YouTube audio capture...`
    - `Audio captured. Listening to YouTube tab audio...`
-   - Repeated `Receiving YouTube audio... RMS=0.0xxx` messages, changing in real time as the stream plays
-4. YouTube audio keeps playing normally (tab audio is still audible)
-5. No subtitle overlay appears on the YouTube page itself — everything shows in the side panel
+   - `Connecting to local Whisper API (ws://127.0.0.1:8787/asr)...`
+   - `Connected to local Whisper API.`
+   - Repeated `Receiving audio... RMS=0.0xxx` messages (sent by the server), changing in real time as the stream plays
+5. When people speak, partial transcript text appears live, followed by a finalized line once the audio pauses — and, if an LLM provider is configured in Settings, its translation shortly after
+6. YouTube audio keeps playing normally (tab audio is still audible)
+7. No subtitle overlay appears on the YouTube page itself — everything shows in the side panel
 
 If the active tab isn't YouTube, the panel shows an error status asking you to open a YouTube tab.
+If the local Whisper API isn't running, the panel keeps showing `Disconnected from
+local Whisper API. Reconnecting...` — audio capture and playback still work fine either way.
 
 ## Development notes
 
-- `npm run dev` starts the Vite dev server, but this project is built around the
-  `npm run build` → **Load unpacked** workflow above; MV3 service workers and
-  offscreen documents are not meant to be hot-reloaded via a dev server.
+- `npm run dev:extension` starts the Vite dev server for the extension alone
+  (`npm run dev` also starts the local Whisper API alongside it), but this
+  project is built around the `npm run build:extension` → **Load unpacked**
+  workflow above; MV3 service workers and offscreen documents are not meant to
+  be hot-reloaded via a dev server.
 - Rebuild (`npm run build`) and click the **reload icon** on the extension card
   in `chrome://extensions` after making changes.
 - Capture is started directly inside `chrome.action.onClicked`, not via
@@ -110,83 +141,82 @@ If the active tab isn't YouTube, the panel shows an error status asking you to o
 - The background service worker keeps the last 100 ASR/status messages in memory
   so reopening the side panel replays recent history via a `HISTORY` message.
 
+## Local Whisper API
+
+Transcription is done by a local FastAPI + faster-whisper server in
+[whisper-api/](whisper-api/README.md), not in the browser. It runs on your
+machine only (`127.0.0.1:8787`) — no audio or transcript ever leaves it, and
+no remote STT API is called.
+
+```bash
+# from the repo root, runs both the Whisper API and the extension's Vite dev build
+npm run dev
+
+# or just the Whisper API on its own
+npm run dev:whisper
+```
+
+See [whisper-api/README.md](whisper-api/README.md) for setup, environment
+variables (model size, device, etc.), and the full WebSocket message format.
+
 ## Plugging in a different ASR engine
 
-ASR logic is isolated behind a small abstraction in `src/offscreen/asr-engine.js`:
+ASR logic is isolated behind a small abstraction re-exported from
+`src/offscreen/asr-engine.js`:
 
 ```js
 export async function createAsrEngine(config) {
-  // config: { sampleRate }
+  // config: { sampleRate, lang }
   return {
     async acceptAudio(pcm16k) {
-      // Feed Float32Array PCM (16kHz) into your engine and return:
-      return { partialText: '...', finalText: '...' }; // both optional
+      // Feed Float32Array PCM (16kHz) into your engine. Since transcription
+      // can happen asynchronously (e.g. over a network/WebSocket), it's fine
+      // to just forward the audio here and send ASR_TEXT messages separately
+      // via chrome.runtime.sendMessage() as results arrive — or return them
+      // directly: { partialText: '...', finalText: '...' } (both optional).
+      return {};
     },
     destroy() {},
   };
 }
 ```
 
-`src/offscreen/offscreen.js` calls `initAsr({ sampleRate })` once (creates the
-engine) and `feedToAsr(pcm16k)` continuously (buffers ~200ms of audio, then
-calls `asrEngine.acceptAudio()` and turns `partialText`/`finalText` into
-`ASR_TEXT` messages) — the audio capture/downsampling pipeline never needs to
-change when swapping engines.
+`src/offscreen/offscreen.js` calls `initAsr({ sampleRate, lang })` once
+(creates the engine) and `feedToAsr(pcm16k)` continuously (buffers ~200ms of
+audio, then calls `asrEngine.acceptAudio()`) — the audio capture/downsampling
+pipeline never needs to change when swapping engines.
 
-The current implementation uses **Vosk WASM** (via the [`vosk-browser`](https://github.com/ccoreilly/vosk-browser)
-package). sherpa-onnx WASM (the spec's first preference) has no ready-to-use npm
-package — its WebAssembly build must be compiled from source with Emscripten,
-which isn't practical to wire up here, so per the spec's documented fallback this
-uses Vosk WASM instead, behind the same `createAsrEngine` interface. To swap in
-sherpa-onnx or Whisper WebGPU later, write a new module with the same interface
-and change the one `import` at the top of `offscreen.js`.
+The active implementation, `src/offscreen/asr-whisper-api.js`, forwards audio
+to a **local Whisper API** (`whisper-api/`, FastAPI + faster-whisper) over a
+WebSocket managed by `src/offscreen/stt-client.js`. Whisper's ASR_STATUS /
+ASR_TEXT / ASR_ERROR messages arrive asynchronously from the server and are
+sent to `background.js` directly by `stt-client.js`, rather than being
+returned from `acceptAudio()`.
 
-LLM-based translation is intentionally out of scope for this phase.
+The **previous** implementation, **Vosk WASM** (via the
+[`vosk-browser`](https://github.com/ccoreilly/vosk-browser) package), is kept
+unchanged and unused in `src/offscreen/asr-vosk.js` in case you need to roll
+back to a fully in-browser engine (no local server process required) — just
+change the one export in `asr-engine.js` back to
+`export { createVoskAsrEngine as createAsrEngine } from './asr-vosk.js';`.
 
-## Setting up the Vosk ASR models
+LLM-based translation of finalized transcript lines (via
+`src/background/translator.js`, configurable per-provider from the side
+panel's Settings section) runs independently of whichever ASR engine is
+active, and only ever sees `isFinal: true` text.
 
-`public/models/` ships with **two** prebuilt model archives, one per supported
-language:
+## ASR models
 
-- `en.tar.gz` — `vosk-model-small-en-us-0.15` (English, ~40MB)
-- `ja.tar.gz` — `vosk-model-small-ja-0.22` (Japanese, ~47MB)
+**The default Whisper engine does not need anything from this repo's
+`public/models/` folder.** `faster-whisper` downloads and caches its own
+model weights (from Hugging Face) automatically the first time the local
+Whisper API starts with a given `STT_MODEL` — see
+[whisper-api/README.md](whisper-api/README.md) for the available model sizes
+and how to change which one is used.
 
-The side panel's **Source language** dropdown switches between them live —
-choosing a language sends a `SET_LANGUAGE` message that background.js persists
-(`chrome.storage.local`) and offscreen.js uses to tear down the current Vosk
-recognizer/model and load the new one, without restarting audio capture. The
-language you pick is remembered across side panel reopens and service worker
-restarts.
-
-`asr-engine.js` resolves the model file for a given language as
-`models/${lang}.tar.gz`, so adding another language is just a matter of
-dropping in a new archive and adding an `<option>` to the dropdown:
-
-1. Download a small model from the official [Vosk models page](https://alphacephei.com/vosk/models)
-   (e.g. `vosk-model-small-vn-0.4` for Vietnamese, `vosk-model-small-ko-0.22` for
-   Korean).
-2. Extract the zip, rename the extracted folder to `model` (so paths inside the
-   archive are `model/am/...`, `model/conf/...`, etc. — this matters, it's what
-   `vosk-browser`'s worker expects), and repackage it as a gzipped tar archive:
-   ```bash
-   mv vosk-model-small-vn-0.4 model
-   tar czf vi.tar.gz model/
-   ```
-3. Copy the archive to `public/models/<lang>.tar.gz` (`<lang>` matching the
-   `value` you'll use for the new `<option>` in `App.jsx`'s Source language
-   dropdown), then rebuild:
-   ```bash
-   npm run build
-   ```
-
-If a model archive is ever missing or fails to load, the side panel still
-shows RMS/status updates plus a clear `ASR_ERROR` explaining the problem —
-audio capture keeps working either way.
-
-> Note: each `<lang>.tar.gz` is a ~40-50MB binary checked into
-> `public/models/`. If you use git and don't want to commit large binaries,
-> add them to `.gitignore` and document the download step for other
-> contributors instead.
+`public/models/en.tar.gz` and `public/models/ja.tar.gz` (Vosk model archives)
+are only used if you roll back to the Vosk WASM engine in `asr-vosk.js` (see
+above) — they're otherwise unused and safe to ignore or delete.
 
 ## Permissions used
 
@@ -196,7 +226,9 @@ audio capture keeps working either way.
 | `tabCapture` | Capture audio from the YouTube tab |
 | `offscreen` | Run the Web Audio / getUserMedia pipeline outside the service worker |
 | `sidePanel` | Render the React UI in Chrome's side panel |
-| `storage` | Reserved for future settings persistence |
+| `storage` | Persist selected languages / LLM provider config across restarts |
+| `host_permissions: http(s)://127.0.0.1:8787/*`, `ws://127.0.0.1:8787/*`, `http://localhost:8787/*`, `ws://localhost:8787/*` | Connect to the local Whisper API (`whisper-api/`) |
+| `host_permissions: https://api.openai.com/*`, `http://localhost:1234/*` | Call an LLM API for translation (see `src/background/translator.js`) |
 | `host_permissions: *://*.youtube.com/*` | Restrict tab-audio capture/behavior to YouTube |
 
 `manifest.json` sets a custom `content_security_policy.extension_pages` of
@@ -205,7 +237,9 @@ audio capture keeps working either way.
 all (Chrome enforces just `script-src 'self'` if you don't declare this
 explicitly, which blocks WASM compilation entirely). This value is explicitly
 sanctioned by Chrome's MV3 CSP validator (unlike `'unsafe-eval'` or `blob:`,
-which are always rejected).
+which are always rejected). It's currently unused by the active (Whisper API)
+ASR engine, which needs no WASM at all — it's kept because `asr-vosk.js`
+(unused, see above) still needs it if you roll back to it.
 
 Separately, `vosk-browser`'s own `Model` class normally spawns its WASM engine
 inside a Web Worker created from a `blob:` URL — but MV3 extension pages reject
@@ -216,13 +250,9 @@ source (which `vosk-browser` embeds as a base64 string in its bundle) at build
 time, patches out its one `new Function(...)` call (Emscripten's cosmetic
 `createNamedFunction` embind helper — also blocked by CSP, since only
 `'wasm-unsafe-eval'` is allowed, not general `eval`/`new Function`), and emits
-it as a real, same-origin file at `dist/offscreen/vosk-worker.js`.
-`src/offscreen/asr-engine.js` loads that file directly with
-`new Worker(chrome.runtime.getURL(...))` (a `'self'` URL) and speaks
-`vosk-browser`'s own postMessage protocol to it by hand, instead of using its
-blob-spawning `Model`/`KaldiRecognizer` classes. As a bonus, this also means
-the 5MB+ Vosk WASM bundle is no longer duplicated into the offscreen
-document's own JS bundle.
+it as a real, same-origin file at `dist/offscreen/vosk-worker.js`. This build
+step still runs (so a Vosk rollback keeps working out of the box), even though
+nothing imports `asr-vosk.js` by default.
 
 ## Support
 

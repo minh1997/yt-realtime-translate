@@ -30,6 +30,11 @@ const TARGET_LANG_LABELS = {
   ja: 'Japanese',
 };
 
+// The extension's only ASR engine now: a local Whisper API (FastAPI +
+// faster-whisper) reached over WebSocket — see whisper-api/ and
+// src/offscreen/asr-whisper-api.js.
+const ASR_ENGINE_LABEL = 'faster-whisper (local API)';
+
 const DEFAULT_LLM_CONFIGS = {
   openai: {
     endpoint: 'https://api.openai.com/v1/chat/completions',
@@ -75,7 +80,6 @@ export default function App() {
   const [settings, setSettings] = useState({
     sourceLang: 'en',
     targetLang: 'vi',
-    asrEngine: 'vosk',
     llmProvider: 'openai',
   });
   const [llmConfigs, setLlmConfigs] = useState(DEFAULT_LLM_CONFIGS);
@@ -349,6 +353,7 @@ export default function App() {
         <span className="status-dot" />
         <span className="status-label">{STATUS_LABELS[status] || status}</span>
         <span className="status-message">{statusMessage}</span>
+        <span className="status-engine">ASR engine: {ASR_ENGINE_LABEL}</span>
       </section>
 
       {(translationStatus || translationError) && (

@@ -9,7 +9,7 @@
     "dev:extension": "vite",
     "build": "vite build",
     "build:extension": "vite build",
-    "dev:whisper": "cd whisper-api && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload"
+    "dev:whisper": "node scripts/dev-whisper.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

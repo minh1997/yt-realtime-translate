@@ -19,9 +19,7 @@ displayed live in a React-based Chrome **Side Panel**.
 
 ## Demo
 
-
-
-
+https://github.com/user-attachments/assets/4f506fb6-068e-4709-bb19-53ddc27ba767
 
 ## Architecture
 

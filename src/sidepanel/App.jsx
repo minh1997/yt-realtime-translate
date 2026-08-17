@@ -183,8 +183,10 @@ export default function App() {
             }
           } else if (entry.type === 'TRANSLATION_STATUS') {
             rebuiltTranslationStatus = entry.status || '';
+            rebuiltTranslationError = '';
           } else if (entry.type === 'TRANSLATED_TEXT') {
             rebuiltTranslationStatus = '';
+            rebuiltTranslationError = '';
             let targetIdx = -1;
             for (let i = rebuiltTranscripts.length - 1; i >= 0; i--) {
               if (
@@ -255,12 +257,14 @@ export default function App() {
 
       if (message.type === 'TRANSLATION_STATUS') {
         setTranslationStatus(message.status || '');
+        setTranslationError('');
         appendLog(message);
         return;
       }
 
       if (message.type === 'TRANSLATED_TEXT') {
         setTranslationStatus('');
+        setTranslationError('');
         applyTranslation(message.sourceText, message.translatedText);
         appendLog(message);
         return;
@@ -480,4 +484,3 @@ export default function App() {
     </div>
   );
 }
-

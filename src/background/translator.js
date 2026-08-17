@@ -105,6 +105,10 @@ export async function translateWithLLM({
       headers,
       body: JSON.stringify({
         model,
+        // Translation needs one completed subtitle, not incremental tokens.
+        // Be explicit because some OpenAI-compatible routers default to SSE
+        // when this field is omitted.
+        stream: false,
         temperature: 0.2,
         max_tokens: 200,
         messages: [
@@ -119,28 +123,88 @@ export async function translateWithLLM({
     throw new Error(`LLM API request failed (${endpoint}): ${err?.message || err}`);
   }
 
+  const responseBody = await response.text().catch(() => '');
+
   if (!response.ok) {
-    let detail = '';
+    let detail = responseBody;
     try {
-      const errBody = await response.json();
+      const errBody = JSON.parse(responseBody);
       detail = errBody?.error?.message || JSON.stringify(errBody);
-    } catch {
-      detail = await response.text().catch(() => '');
-    }
+    } catch {}
     throw new Error(`LLM API error ${response.status} ${response.statusText}: ${detail || '(no details)'}`);
+  }
+
+  return parseAssistantContent(responseBody, response.headers.get('content-type') || '');
+}
+
+function parseAssistantContent(responseBody, contentType) {
+  const body = responseBody.trim();
+  const isEventStream = contentType.toLowerCase().includes('text/event-stream') || body.startsWith('data:');
+
+  if (isEventStream) {
+    return parseSseAssistantContent(body);
   }
 
   let data;
   try {
-    data = await response.json();
+    data = JSON.parse(body);
   } catch (err) {
     throw new Error(`LLM API returned invalid JSON: ${err?.message || err}`);
   }
 
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string' || !content.trim()) {
+  const content = contentToText(data?.choices?.[0]?.message?.content);
+  if (!content.trim()) {
     throw new Error('LLM API response did not contain choices[0].message.content');
   }
 
   return content.trim();
+}
+
+function parseSseAssistantContent(responseBody) {
+  let content = '';
+  let sawDataEvent = false;
+
+  for (const rawLine of responseBody.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith('data:')) continue;
+
+    sawDataEvent = true;
+    const eventBody = line.slice('data:'.length).trim();
+    if (!eventBody || eventBody === '[DONE]') continue;
+
+    let event;
+    try {
+      event = JSON.parse(eventBody);
+    } catch (err) {
+      throw new Error(`LLM API returned invalid SSE data: ${err?.message || err}`);
+    }
+
+    if (event?.error) {
+      throw new Error(event.error.message || JSON.stringify(event.error));
+    }
+
+    const choice = event?.choices?.[0];
+    content += contentToText(choice?.delta?.content ?? choice?.message?.content);
+  }
+
+  if (!sawDataEvent) {
+    throw new Error('LLM API returned an empty event stream');
+  }
+  if (!content.trim()) {
+    throw new Error('LLM API event stream did not contain assistant text');
+  }
+
+  return content.trim();
+}
+
+function contentToText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      return typeof part?.text === 'string' ? part.text : '';
+    })
+    .join('');
 }

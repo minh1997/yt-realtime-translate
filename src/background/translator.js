@@ -110,7 +110,9 @@ export async function translateWithLLM({
         // when this field is omitted.
         stream: false,
         temperature: 0.2,
-        max_tokens: 200,
+        // GPT-OSS uses output tokens for reasoning as well as the final
+        // translation. A 200-token cap can end generation before content exists.
+        max_tokens: /gpt[-_]oss/i.test(model) ? 2048 : 200,
         messages: [
           { role: 'system', content: buildSystemPrompt(targetLang) },
           { role: 'user', content: userMessage },
@@ -134,7 +136,34 @@ export async function translateWithLLM({
     throw new Error(`LLM API error ${response.status} ${response.statusText}: ${detail || '(no details)'}`);
   }
 
-  return parseAssistantContent(responseBody, response.headers.get('content-type') || '');
+  const translatedText = parseAssistantContent(responseBody, response.headers.get('content-type') || '');
+  return validateTranslation(translatedText);
+}
+
+function validateTranslation(text) {
+  // A chat server should decode the model's message/channel format before
+  // returning message.content. Removing only the delimiters would leave
+  // reasoning and instructions mixed into the subtitle, so reject the response.
+  if (/<\|(?:start|end|channel|message|im_start|im_end|im_sep|meta_sep|meta_start|fim_suffix|ghissue|ghreview|constrain|call)\|>|<\/?think>/u.test(text)) {
+    throw new Error(
+      'LLM API returned raw model control tokens instead of a clean translation. ' +
+        'In LM Studio, update the app and inference runtime, restore the model default prompt template, ' +
+        'then unload/reload GPT-OSS. Reload the extension and clear its history before trying again.'
+    );
+  }
+
+  // Some local inference runtimes return a successful HTTP response whose
+  // content is only question marks. Reject it before background.js saves it
+  // as translation context, which would feed the broken output into later calls.
+  const compact = text.replace(/\s/gu, '');
+  if (compact.length >= 8 && /^[?\uFF1F\uFFFD]+$/u.test(compact)) {
+    throw new Error(
+      'LLM API returned repeated question marks instead of a translation. ' +
+        'Check the model output directly in your LLM server. For GPT-OSS in LM Studio, ' +
+        'unload/reload the model and try the Vulkan or CPU inference runtime instead of CUDA.'
+    );
+  }
+  return text;
 }
 
 function parseAssistantContent(responseBody, contentType) {
@@ -152,17 +181,24 @@ function parseAssistantContent(responseBody, contentType) {
     throw new Error(`LLM API returned invalid JSON: ${err?.message || err}`);
   }
 
-  const content = contentToText(data?.choices?.[0]?.message?.content);
-  if (!content.trim()) {
-    throw new Error('LLM API response did not contain choices[0].message.content');
+  if (data?.error) {
+    throw new Error(data.error.message || JSON.stringify(data.error));
   }
 
-  return content.trim();
+  const choice = data?.choices?.[0];
+  const message = choice?.message;
+  return requireFinalTranslation(
+    contentToText(message?.content),
+    choice?.finish_reason,
+    Boolean(message?.reasoning || message?.reasoning_content)
+  );
 }
 
 function parseSseAssistantContent(responseBody) {
   let content = '';
   let sawDataEvent = false;
+  let finishReason;
+  let hasReasoning = false;
 
   for (const rawLine of responseBody.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -184,17 +220,41 @@ function parseSseAssistantContent(responseBody) {
     }
 
     const choice = event?.choices?.[0];
-    content += contentToText(choice?.delta?.content ?? choice?.message?.content);
+    const message = choice?.delta ?? choice?.message;
+    content += contentToText(message?.content);
+    hasReasoning ||= Boolean(message?.reasoning || message?.reasoning_content);
+    if (choice?.finish_reason != null) finishReason = choice.finish_reason;
   }
 
   if (!sawDataEvent) {
     throw new Error('LLM API returned an empty event stream');
   }
-  if (!content.trim()) {
-    throw new Error('LLM API event stream did not contain assistant text');
-  }
 
-  return content.trim();
+  return requireFinalTranslation(content, finishReason, hasReasoning);
+}
+
+function requireFinalTranslation(content, finishReason, hasReasoning) {
+  if (content.trim()) return content.trim();
+
+  if (finishReason === 'length') {
+    throw new Error(
+      'LLM API reached the output token limit before producing a final translation ' +
+        '(finish_reason: length). Increase max_tokens or lower the model reasoning effort in LM Studio.'
+    );
+  }
+  if (hasReasoning) {
+    // Reasoning is not a translated subtitle and must not become context for
+    // later translations. Only the final assistant content is displayed.
+    throw new Error(
+      'LLM API returned reasoning without a final translation. ' +
+        'Increase max_tokens or lower the model reasoning effort in LM Studio.'
+    );
+  }
+  throw new Error(
+    'LLM API response did not contain choices[0].message.content ' +
+      `(finish_reason: ${finishReason ?? 'missing'}). ` +
+      'Check the LM Studio server response and use the /v1/chat/completions endpoint.'
+  );
 }
 
 function contentToText(content) {

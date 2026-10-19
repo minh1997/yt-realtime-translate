@@ -205,6 +205,27 @@ LLM-based translation of finalized transcript lines (via
 panel's Settings section) runs independently of whichever ASR engine is
 active, and only ever sees `isFinal: true` text.
 
+## LM Studio translation troubleshooting
+
+If a GPT-OSS translation contains `<|start|>`, `<|channel|>analysis`, or similar
+control tokens, the API returned raw model formatting inside `message.content`.
+The extension rejects these responses because stripping the tokens alone would
+mix reasoning or instructions into the translated subtitle.
+
+Update LM Studio and its inference runtime, restore the model's default prompt
+template (LM Studio normally selects it from the model metadata), then unload
+and reload the model. Use the `/v1/chat/completions` endpoint and the actual model
+identifier shown in LM Studio. After rebuilding the extension, reload it at
+`chrome://extensions` and clear its history to remove any earlier broken output.
+See LM Studio's [prompt template documentation](https://lmstudio.ai/docs/app/advanced/prompt-template).
+
+GPT-OSS receives a 2,048-token output budget to allow room for reasoning and the
+final translation. If the model still returns only reasoning or hits the token
+limit, lower its reasoning effort in LM Studio or increase the budget in
+`src/background/translator.js`. For repeated `????` output, see the
+[reported GPT-OSS CUDA runtime issue](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1841);
+the reporter found that Vulkan and CPU produced clean output.
+
 ## ASR models
 
 **The default Whisper engine does not need anything from this repo's

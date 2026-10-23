@@ -214,3 +214,65 @@ test('allows ordinary uses of channel names and angle brackets', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => jsonResponse(translation));
   assert.equal(await translateWithLLM({ currentText: 'Example', llmConfig }), translation);
 });
+
+test('blocks the reproduced Japanese ASR noise before calling LM Studio', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => {
+    throw new Error('No API request should be sent');
+  });
+  await assert.rejects(
+    translateWithLLM({ currentText: 'デ'.repeat(256), sourceLang: 'ja', llmConfig }),
+    /ASR transcript contains 64 or more identical characters/
+  );
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test('blocks excessive repetition embedded in meaningful source text', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse('Unused'));
+  await assert.rejects(
+    translateWithLLM({ currentText: `Hello ${'デ'.repeat(64)} goodbye`, llmConfig }),
+    /Translation skipped/
+  );
+  assert.equal(fetchMock.mock.callCount(), 0);
+});
+
+test('filters noisy context without mismatching source and translation pairs', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (_endpoint, options) => {
+    const context = JSON.parse(JSON.parse(options.body).messages[1].content);
+    assert.deepEqual(context.recent_source, ['Hello', 'Goodbye']);
+    assert.deepEqual(context.recent_translation, ['Xin chào', 'Tạm biệt']);
+    assert.equal(context.current_text, 'Thank you');
+    return jsonResponse('Cảm ơn');
+  });
+  assert.equal(await translateWithLLM({
+    currentText: 'Thank you',
+    recentSource: ['Hello', 'デ'.repeat(256), 'Broken translation', 'Goodbye'],
+    recentTranslation: ['Xin chào', 'Noise', 'a'.repeat(64), 'Tạm biệt'],
+    llmConfig,
+  }), 'Cảm ơn');
+});
+
+test('preserves ordinary repetitions and long meaningful source text', async (t) => {
+  const source = 'The speaker says hello. '.repeat(50) + 'デ'.repeat(12);
+  t.mock.method(globalThis, 'fetch', async (_endpoint, options) => {
+    assert.equal(JSON.parse(JSON.parse(options.body).messages[1].content).current_text, source);
+    return jsonResponse('Người nói chào.');
+  });
+  assert.equal(await translateWithLLM({ currentText: source, llmConfig }), 'Người nói chào.');
+});
+
+test('rejects repeated model output before it becomes translation context', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => jsonResponse('デ'.repeat(256)));
+  await assert.rejects(
+    translateWithLLM({ currentText: 'Hello', llmConfig }),
+    /excessive repeated characters/
+  );
+});
+
+test('counts repeated Unicode code points rather than UTF-16 code units', async (t) => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', async () => jsonResponse('Unused'));
+  await assert.rejects(
+    translateWithLLM({ currentText: '😀'.repeat(64), llmConfig }),
+    /ASR transcript contains 64 or more identical characters/
+  );
+  assert.equal(fetchMock.mock.callCount(), 0);
+});

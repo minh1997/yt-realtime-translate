@@ -84,12 +84,30 @@ export async function translateWithLLM({
 }) {
   const { endpoint, apiKey, model } = llmConfig;
 
+  // ASR can hallucinate hundreds of identical characters (e.g. Japanese
+  // "デデデ..."). This reproduces a tokenizer failure in LM Studio before
+  // inference starts. Keep the source intact and skip the unusable subtitle.
+  if (hasExcessiveRepetition(currentText)) {
+    throw new Error(
+      'ASR transcript contains 64 or more identical characters in a row. ' +
+        'Translation skipped to avoid an LM Studio tokenizer error. Check the source transcript and audio.'
+    );
+  }
+
+  // Keep context pairs aligned when excluding earlier ASR/model noise.
+  const context = recentSource.map((source, index) => ({
+    source,
+    translation: recentTranslation[index],
+  })).filter(({ source, translation }) =>
+    !hasExcessiveRepetition(source) && !hasExcessiveRepetition(translation)
+  );
+
   const userMessage = JSON.stringify({
     source_lang: sourceLang,
     target_lang: targetLang,
     glossary,
-    recent_source: recentSource,
-    recent_translation: recentTranslation,
+    recent_source: context.map(({ source }) => source),
+    recent_translation: context.map(({ translation }) => translation),
     current_text: currentText,
   });
 
@@ -140,6 +158,19 @@ export async function translateWithLLM({
   return validateTranslation(translatedText);
 }
 
+function hasExcessiveRepetition(text = '') {
+  let previous;
+  let runLength = 0;
+  // Iterate Unicode code points in linear time rather than applying another
+  // backtracking regex to potentially pathological input.
+  for (const character of text) {
+    runLength = character === previous ? runLength + 1 : 1;
+    if (runLength >= 64) return true;
+    previous = character;
+  }
+  return false;
+}
+
 function validateTranslation(text) {
   // A chat server should decode the model's message/channel format before
   // returning message.content. Removing only the delimiters would leave
@@ -162,6 +193,9 @@ function validateTranslation(text) {
         'Check the model output directly in your LLM server. For GPT-OSS in LM Studio, ' +
         'unload/reload the model and try the Vulkan or CPU inference runtime instead of CUDA.'
     );
+  }
+  if (hasExcessiveRepetition(text)) {
+    throw new Error('LLM API returned excessive repeated characters instead of a usable translation.');
   }
   return text;
 }

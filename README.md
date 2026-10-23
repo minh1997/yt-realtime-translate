@@ -207,6 +207,17 @@ active, and only ever sees `isFinal: true` text.
 
 ## LM Studio translation troubleshooting
 
+Long runs of identical ASR characters (for example, hundreds of `デ` characters)
+can trigger LM Studio's `Failed to process regex` tokenizer error. This was
+reproduced locally with 256 copies of `デ`. The extension skips translation when
+a transcript contains 64 or more identical characters in a row, preserving the
+original Source text for inspection. This is a conservative noise threshold,
+not a tokenizer limit. Context pairs containing such repetition are excluded
+from subsequent requests, and similarly repetitive model output is rejected.
+This guard prevents the reproduced trigger; it does not fix the underlying
+inference runtime or cover every possible tokenizer error. See the
+[matching LM Studio bug report](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/1667).
+
 If a GPT-OSS translation contains `<|start|>`, `<|channel|>analysis`, or similar
 control tokens, the API returned raw model formatting inside `message.content`.
 The extension rejects these responses because stripping the tokens alone would
